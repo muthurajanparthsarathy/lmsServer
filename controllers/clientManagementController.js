@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const ClientManagement = require("../models/ClientManagementModel");
+const { pocClientFilter, scopeHasClient } = require("../utils/pocScope");
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -19,7 +20,12 @@ const CLIENT_COLLATION = { locale: "en", strength: 1, numericOrdering: true };
 
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-async function getClientsPaginated(req, res, institutionId) {
+// `scopeMatch` is `{}` for every role except a POC, for whom it is
+// `{ _id: { $in: [...] } }`. It is applied to the row filter AND to the facet
+// counts below — the facets are computed over the whole institution, so
+// omitting them there would leak the true client total even though the rows
+// were scoped.
+async function getClientsPaginated(req, res, institutionId, scopeMatch = {}) {
   const {
     page, limit, search, status, businessModel, type, since, sortKey, sortDir,
   } = req.query;
@@ -28,7 +34,7 @@ async function getClientsPaginated(req, res, institutionId) {
   const pageNum = Math.max(1, parseInt(page, 10) || 1);
   const perPage = Math.min(isExport ? 5000 : 200, Math.max(1, parseInt(limit, 10) || 10));
 
-  const filter = { institution: institutionId };
+  const filter = { institution: institutionId, ...scopeMatch };
   if (status) filter.status = status;
   if (businessModel) filter.businessModel = businessModel;
   // `type` is an array on the document; an equality match on an array field
@@ -157,7 +163,7 @@ async function getClientsPaginated(req, res, institutionId) {
   // Facets the page derived from the full list: the business-model filter
   // options, and the four header chips. Both are over EVERY client in the
   // institution, not the current filter, which is what the page showed.
-  const base = { institution: institutionId };
+  const base = { institution: institutionId, ...scopeMatch };
   const [models, totalAll, activeAll] = await Promise.all([
     ClientManagement.distinct("businessModel", base),
     ClientManagement.countDocuments(base),
@@ -334,6 +340,11 @@ const clientManagementController = {
   getAllClients: async (req, res) => {
     try {
       const institutionId = req.user.institution;
+      // `{}` for every role except a POC, which gets `{ _id: { $in: [...] } }`
+      // — the clients reachable from the courses it is enrolled in. An empty
+      // scope yields `$in: []`, i.e. no rows: a POC enrolled in nothing sees
+      // nothing rather than the institution list.
+      const scopeMatch = pocClientFilter(req.pocScope);
 
       // ── Paginated mode (opt-in via `page`) ────────────────────────────────
       // Without `page` this returns the whole list exactly as it always has,
@@ -341,7 +352,7 @@ const clientManagementController = {
       // four filters and the sort all run in Mongo and one page crosses the
       // wire — the page's own predicate, ported field for field.
       if (req.query.page !== undefined) {
-        return await getClientsPaginated(req, res, institutionId);
+        return await getClientsPaginated(req, res, institutionId, scopeMatch);
       }
 
       // Names only. The Add/Edit form warns inline when a company name is
@@ -352,7 +363,7 @@ const clientManagementController = {
       // regardless; this keeps the error appearing on blur rather than only
       // after submit.)
       if (req.query.names === "1" || req.query.names === "true") {
-        const names = await ClientManagement.find({ institution: institutionId })
+        const names = await ClientManagement.find({ institution: institutionId, ...scopeMatch })
           .select("clientCompany")
           .lean();
         return res.status(200).json({ success: true, count: names.length, data: names });
@@ -360,7 +371,7 @@ const clientManagementController = {
 
       // Read-only path — .lean() halves serialization + memory overhead on
       // the BM list; res.json only ever inspects plain values.
-      const clients = await ClientManagement.find({ institution: institutionId })
+      const clients = await ClientManagement.find({ institution: institutionId, ...scopeMatch })
         .sort({ createdAt: -1 })
         .lean();
 
@@ -390,6 +401,15 @@ const clientManagementController = {
           success: false,
           message: "Invalid client ID format",
         });
+      }
+
+      // Membership test rather than merging a filter: spreading the scope into
+      // the query below would produce `{ _id: clientId, ..., _id: { $in } }`,
+      // where the second key silently overwrites the first. The reply reuses
+      // the existing 404 so an out-of-scope id is indistinguishable from a
+      // missing one — a POC cannot probe for which clients exist.
+      if (!scopeHasClient(req.pocScope, clientId)) {
+        return res.status(404).json({ success: false, message: "Client not found" });
       }
 
       const client = await ClientManagement.findOne({

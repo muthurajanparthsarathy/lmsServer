@@ -1,5 +1,6 @@
 const express = require("express");
 const { userAuth } = require("../../middlewares/userAuth");
+const { attachPocScope, guardCourseWrite, guardClientWrite } = require("../../middlewares/pocScope");
 const {
   createCourseStructure,
   getCourseStructure,
@@ -18,24 +19,28 @@ const {
 } = require("../../controllers/courses/courseStructure");
 const router = express.Router();
 
-router.post("/courses-structure/create", userAuth, createCourseStructure);
+// Per-route, not `router.use`, because this router owns several path prefixes
+// and its `/courses/...` overlap with answerRoutes and exerciseAndQuestionRoutes.
+const scoped = [userAuth, attachPocScope];
 
-router.get("/courses-structure/getAll", userAuth, getCourseStructure);
+// Create: gated on `req.body.clientId` so a POC can only stand up a new course
+// under a client it already works with.
+router.post("/courses-structure/create", scoped, guardClientWrite(), createCourseStructure);
+router.get("/courses-structure/getAll", scoped, getCourseStructure);
+router.get("/courses-structure/getById/:id", scoped, getCourseStructureById);
+router.put("/courses-structure/update/:courseId", scoped, guardCourseWrite(), updateCourseStructure);
+router.delete("/courses-structure/delete/:id", scoped, guardCourseWrite("id"), deleteCourseStructure);
 
-router.get("/courses-structure/getById/:id", userAuth, getCourseStructureById);
-router.put("/courses-structure/update/:courseId", userAuth, updateCourseStructure);
-router.delete("/courses-structure/delete/:id", userAuth, deleteCourseStructure);
+router.post("/add-participants/:courseId", scoped, guardCourseWrite(), batchAddParticipants);
+router.delete("/delete/participant/:courseId/:userId", scoped, guardCourseWrite(), deleteAddParticipants);
+router.delete("/delete-participants/multiple/:courseId", scoped, guardCourseWrite(), deleteMultipleParticipants);
+router.put('/update-enrollment/:courseId/:participantId', scoped, guardCourseWrite(), updateParticipantEnrollment);
 
-router.post("/add-participants/:courseId", userAuth, batchAddParticipants);
-router.delete("/delete/participant/:courseId/:userId", userAuth, deleteAddParticipants);
-router.delete("/delete-participants/multiple/:courseId", userAuth, deleteMultipleParticipants);
-router.put('/update-enrollment/:courseId/:participantId',userAuth, updateParticipantEnrollment);
+router.get("/courses/:courseId/batches", scoped, getCourseBatches);
+router.put("/courses/:courseId/batches/:batchId", scoped, guardCourseWrite(), updateBatch);
+router.delete("/courses/:courseId/batches/:batchId", scoped, guardCourseWrite(), deleteBatch);
 
-router.get("/courses/:courseId/batches", userAuth, getCourseBatches);
-router.put("/courses/:courseId/batches/:batchId", userAuth, updateBatch);
-router.delete("/courses/:courseId/batches/:batchId", userAuth, deleteBatch);
-
-router.get('/courses/:courseId/approval-hierarchy', userAuth, getApprovalHierarchy);
-router.put('/courses/:courseId/approval-hierarchy', userAuth, updateApprovalHierarchy);
+router.get('/courses/:courseId/approval-hierarchy', scoped, getApprovalHierarchy);
+router.put('/courses/:courseId/approval-hierarchy', scoped, guardCourseWrite(), updateApprovalHierarchy);
 
 module.exports = router;

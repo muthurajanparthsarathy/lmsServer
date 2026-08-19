@@ -8,27 +8,20 @@ const {
   getAttendanceSummary,
 } = require("../../controllers/courses/attendance");
 const { userAuth } = require("../../middlewares/userAuth");
+const { attachPocScope, guardCourseWrite } = require("../../middlewares/pocScope");
 
 const router = express.Router();
 
-// The Attendance Management listing: every course the requester may mark,
-// with per-batch student counts and marked-today flags, role-scoped.
-router.get("/attendance/overview", userAuth, getAttendanceOverview);
+router.use("/attendance", userAuth, attachPocScope);
 
-// The batch's training window — the marking boundary the save enforces.
-router.get("/attendance/window/:courseId", userAuth, getAttendanceWindow);
-
-// Fetch attendance for a course over a date range (optionally ?batchId=).
-router.get("/attendance/get/:courseId", userAuth, getAttendance);
-
-// The Report/Analytics aggregates for a course over a date range, computed in
-// Mongo. The pages used to derive these from every record in the range.
-router.get("/attendance/summary/:courseId", userAuth, getAttendanceSummary);
-
-// Bulk upsert / clear attendance for a course.
-router.post("/attendance/save/:courseId", userAuth, bulkSaveAttendance);
-
-// Wipe attendance for a course (optionally scoped by a date range).
-router.delete("/attendance/reset/:courseId", userAuth, resetAttendance);
+// A POC may MARK attendance on the courses it is enrolled in — same action
+// space as an admin, just narrower target set. Reads are still scoped through
+// req.pocScope inside the handlers.
+router.get("/attendance/overview", getAttendanceOverview);
+router.get("/attendance/window/:courseId", getAttendanceWindow);
+router.get("/attendance/get/:courseId", getAttendance);
+router.get("/attendance/summary/:courseId", getAttendanceSummary);
+router.post("/attendance/save/:courseId", guardCourseWrite(), bulkSaveAttendance);
+router.delete("/attendance/reset/:courseId", guardCourseWrite(), resetAttendance);
 
 module.exports = router;

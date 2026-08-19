@@ -7,6 +7,12 @@ const {
   collectMappingCourseIds,
   detachUsersFromMapping,
 } = require("../utils/cascadeDeleteCourses");
+const {
+  pocMappingFilter,
+  pocCourseFilter,
+  scopeHasMapping,
+  scopeHasClient,
+} = require("../utils/pocScope");
 
 // Canonical hierarchy levels. Order matters (top → bottom). New levels can be
 // appended here (and in the client-side catalog) without any schema change.
@@ -72,17 +78,23 @@ const setupStatusOf = (p) => {
   return "in-progress";
 };
 
-async function getSetupProgress(institutionId) {
+async function getSetupProgress(institutionId, scope) {
   const oid = new mongoose.Types.ObjectId(String(institutionId));
+  // Feeds the four header tiles and the Course filter's options, both of which
+  // count the whole book of work — so for a POC "the whole book" has to mean
+  // its own mappings and courses, not the institution's.
   const [mappings, setups] = await Promise.all([
     // createdAt-desc so the "first spelling wins" course-name dedupe below,
     // and the base order the derived sorts tie-break on, both match what the
     // page saw when it held the legacy list (which arrives in this order).
-    ServiceMapping.find({ institution: oid }, { client: 1, courses: 1 })
+    ServiceMapping.find(
+      { institution: oid, ...pocMappingFilter(scope) },
+      { client: 1, courses: 1 }
+    )
       .sort({ createdAt: -1 })
       .lean(),
     CourseStructure.find(
-      { institution: oid },
+      { institution: oid, ...pocCourseFilter(scope) },
       { clientId: 1, mappingId: 1, coursePath: 1, courseName: 1 }
     ).lean(),
   ]);
@@ -194,7 +206,7 @@ async function getMappingsPaginated(req, res, institutionId) {
   // Opt-in, because it costs two extra reads: only Course Setup shows setup
   // progress. Without it this endpoint behaves exactly as it did.
   const wantSetup = req.query.setup === "1" || req.query.setup === "true";
-  const progress = wantSetup ? await getSetupProgress(institutionId) : null;
+  const progress = wantSetup ? await getSetupProgress(institutionId, req.pocScope) : null;
   // Setup progress is keyed by MAPPING id, so it cannot rank or annotate rows
   // that are clients. Course Setup never groups, so the two are simply
   // exclusive rather than reconciled.
@@ -203,6 +215,16 @@ async function getMappingsPaginated(req, res, institutionId) {
     && (sortKey === "progress" || sortKey === "setupStatus");
 
   const match = { institution: new mongoose.Types.ObjectId(String(institutionId)) };
+  // POC scope goes through `$and`, NOT onto `match._id`, because the
+  // setupStatus filter below assigns `match._id` outright and would erase it.
+  // Both constraints then apply — Mongo ANDs a top-level key with `$and`.
+  //
+  // This is also what neutralises a hand-crafted `?client=<someone else's id>`
+  // further down: that only narrows, and the intersection with the POC's own
+  // mapping ids stays empty.
+  if (req.pocScope?.isPoc) {
+    (match.$and = match.$and || []).push({ _id: { $in: req.pocScope.mappingIds } });
+  }
   if (status) match.status = status;
   if (year) match.year = year;
   if (service) match.service = service;
@@ -246,7 +268,9 @@ async function getMappingsPaginated(req, res, institutionId) {
   if (department) hierarchy.push(levelMatch("department", department));
   if (section) hierarchy.push(levelMatch("section", section));
   if (semester) hierarchy.push(levelMatch("semester", semester));
-  if (hierarchy.length) match.$and = hierarchy;
+  // Merged, not assigned: a bare `match.$and = hierarchy` would drop the POC
+  // scope constraint pushed above.
+  if (hierarchy.length) match.$and = [...(match.$and || []), ...hierarchy];
 
   const pipeline = [
     { $match: match },
@@ -499,7 +523,7 @@ async function getMappingsPaginated(req, res, institutionId) {
     });
   }
 
-  const facets = await getMappingFacets(institutionId);
+  const facets = await getMappingFacets(institutionId, req.pocScope);
   if (progress) {
     // The Course filter's options. Deduped case-insensitively but shown with
     // the first spelling seen, exactly as the page built them.
@@ -524,8 +548,14 @@ async function getMappingsPaginated(req, res, institutionId) {
  * list. All are over EVERY mapping in the institution rather than the current
  * filter — which is what the page showed.
  */
-async function getMappingFacets(institutionId) {
-  const base = { institution: new mongoose.Types.ObjectId(String(institutionId)) };
+async function getMappingFacets(institutionId, scope) {
+  // Scoped for a POC as well: the `clients` facet returns every client company
+  // name in the institution, so leaving it unscoped would leak the full client
+  // list through the filter dropdown even when the rows themselves are scoped.
+  const base = {
+    institution: new mongoose.Types.ObjectId(String(institutionId)),
+    ...pocMappingFilter(scope),
+  };
   const [row] = await ServiceMapping.aggregate([
     { $match: base },
     {
@@ -1171,17 +1201,25 @@ const serviceMappingController = {
         return await getMappingsPaginated(req, res, institutionId);
       }
 
-      try {
-        await migrateLegacyServices(institutionId);
-      } catch (migrationError) {
-        console.error("Legacy service migration failed:", migrationError);
+      // Skipped for a POC: this is a bulk WRITE across every legacy mapping in
+      // the institution, and a read-only principal must not trigger writes on
+      // other clients' records just by opening a list.
+      if (!req.pocScope?.isPoc) {
+        try {
+          await migrateLegacyServices(institutionId);
+        } catch (migrationError) {
+          console.error("Legacy service migration failed:", migrationError);
+        }
       }
 
       // Read-only path — .lean() is the biggest cheap win on the BM hot path
       // (mappings embed 4-level nested masterData/hierarchy/courses/batchConfigs
       // subdocs; full Mongoose hydration was pure overhead). populate works
       // with lean.
-      const mappings = await ServiceMapping.find({ institution: institutionId })
+      const mappings = await ServiceMapping.find({
+        institution: institutionId,
+        ...pocMappingFilter(req.pocScope),
+      })
         .populate("client", "clientCompany status type")
         .populate("partnerInstitutions", "clientCompany status type")
         .sort({ createdAt: -1 })
@@ -1210,6 +1248,13 @@ const serviceMappingController = {
 
       if (!mongoose.Types.ObjectId.isValid(mappingId)) {
         return res.status(400).json({ success: false, message: "Invalid mapping ID format" });
+      }
+
+      // Membership test rather than a merged filter — the query below already
+      // pins `_id`, so spreading a scope filter in would overwrite one of them.
+      // Reuses the existing 404 so an out-of-scope id looks like a missing one.
+      if (!scopeHasMapping(req.pocScope, mappingId)) {
+        return res.status(404).json({ success: false, message: " not found" });
       }
 
       const mapping = await ServiceMapping.findOne({
@@ -1244,10 +1289,20 @@ const serviceMappingController = {
         return res.status(400).json({ success: false, message: "Invalid client ID format" });
       }
 
+      // `clientId` is caller-supplied, so this is the direct URL-manipulation
+      // path: a POC asking for a client outside its scope gets an empty list,
+      // not that client's services. Empty rather than 404 because the caller
+      // may legitimately not know the id is out of scope.
+      if (!scopeHasClient(req.pocScope, clientId)) {
+        return res.status(200).json({ success: true, count: 0, data: [] });
+      }
+
       const mappings = await ServiceMapping.find({
         institution: institutionId,
         client: clientId,
       })
+        .populate("client", "clientCompany status type")
+        .populate("partnerInstitutions", "clientCompany status type")
         .sort({ createdAt: -1 })
         .lean();
 

@@ -9,16 +9,20 @@ const {
   toggleMappingStatus,
 } = require("../controllers/serviceMappingController");
 const { userAuth } = require("../middlewares/userAuth");
+const { attachPocScope, guardMappingWrite, guardClientWrite } = require("../middlewares/pocScope");
 
 const router = express.Router();
 
-// Service Mapping routes (client ↔ service configuration, standalone module)
-router.post("/service-mapping/create", userAuth, createMapping);
-router.get("/service-mapping/getAll", userAuth, getAllMappings);
-router.get("/service-mapping/getById/:mappingId", userAuth, getMappingById);
-router.get("/service-mapping/getByClient/:clientId", userAuth, getMappingsByClient);
-router.put("/service-mapping/update/:mappingId", userAuth, updateMapping);
-router.delete("/service-mapping/delete/:mappingId", userAuth, deleteMapping);
-router.put("/service-mapping/toggle-status/:mappingId", userAuth, toggleMappingStatus);
+router.use("/service-mapping", userAuth, attachPocScope);
+
+// A POC keeps the mapping actions, but only for mappings whose client is in
+// its scope. Create is guarded on the body's `client` id.
+router.post("/service-mapping/create", guardClientWrite("_client_"), createMapping);
+router.get("/service-mapping/getAll", getAllMappings);
+router.get("/service-mapping/getById/:mappingId", getMappingById);
+router.get("/service-mapping/getByClient/:clientId", getMappingsByClient);
+router.put("/service-mapping/update/:mappingId", guardMappingWrite(), updateMapping);
+router.delete("/service-mapping/delete/:mappingId", guardMappingWrite(), deleteMapping);
+router.put("/service-mapping/toggle-status/:mappingId", guardMappingWrite(), toggleMappingStatus);
 
 module.exports = router;

@@ -13,6 +13,7 @@ const StudentAttendance = require("../../models/Courses/StudentAttendanceModel")
 const CourseStructure = require("../../models/Courses/courseStructureModal");
 const User = require("../../models/UserModel");
 const Role = require("../../models/RoleModel");
+const { scopeHasCourse } = require("../../utils/pocScope");
 
 // Normalize any incoming date value (string or Date) to midnight UTC.
 const dayUtc = (value) => {
@@ -60,13 +61,17 @@ const isAdminUser = async (user) => {
   }
 };
 
-// Institution-wide VIEWER tier (read-only): L&D Head / Sub Head / POC see
-// attendance for every course in the overview, like an admin, but do NOT gain
-// marking or reset rights — those stay gated on isAdminUser. Matched by
-// roleValue ("ldhead" / "subhead" / "poc") so it is precise and additive; no
-// existing role's behaviour changes. POC qualifies because it is an
+// Institution-wide VIEWER tier (read-only): L&D Head / Sub Head see attendance
+// for every course in the overview, like an admin, but do NOT gain marking or
+// reset rights — those stay gated on isAdminUser. Matched by roleValue
+// ("ldhead" / "subhead") so it is precise and additive.
+//
+// POC used to be in this tier, on the reasoning that it was "an
 // institution-level contact role — never client-bound, never enrolled in
-// batches — so the staff branch would always hand it an empty list.
+// batches". That is no longer true: a POC is enrolled into courses exactly as
+// a trainer is, and is scoped to those courses and their clients. It is
+// deliberately NOT institution-wide here — its attendance reach comes from
+// `req.pocScope.courseIds` instead. L&D Head and Sub Head are unchanged.
 const isManagerViewer = async (user) => {
   try {
     const role = user?.role;
@@ -87,7 +92,7 @@ const isManagerViewer = async (user) => {
         rv = raw.toLowerCase();
       }
     }
-    return rv === "ldhead" || rv === "subhead" || rv === "poc";
+    return rv === "ldhead" || rv === "subhead";
   } catch {
     return false;
   }
@@ -272,6 +277,16 @@ exports.getAttendance = async (req, res) => {
       return res
         .status(400)
         .json({ message: [{ key: "error", value: "Invalid courseId" }] });
+    }
+
+    // `courseId` is caller-supplied and this route has never checked that the
+    // caller may read the course at all. For a POC it now does: attendance
+    // carries no clientId, so the course set is the only thing that can bound
+    // it. `batchId`/`studentId` below only narrow an already-scoped set.
+    if (!scopeHasCourse(req.pocScope, courseId)) {
+      return res
+        .status(403)
+        .json({ message: [{ key: "error", value: "Not authorized for this course" }] });
     }
 
     const filter = { courseId };
@@ -607,6 +622,11 @@ exports.getAttendanceWindow = async (req, res) => {
         .status(400)
         .json({ message: [{ key: "error", value: "Invalid courseId" }] });
     }
+    if (!scopeHasCourse(req.pocScope, courseId)) {
+      return res
+        .status(403)
+        .json({ message: [{ key: "error", value: "Not authorized for this course" }] });
+    }
     const course = await CourseStructure.findById(courseId)
       .select("institution clientId")
       .lean();
@@ -670,6 +690,12 @@ exports.getAttendanceSummary = async (req, res) => {
       return res
         .status(400)
         .json({ message: [{ key: "error", value: "Invalid courseId" }] });
+    }
+
+    if (!scopeHasCourse(req.pocScope, courseId)) {
+      return res
+        .status(403)
+        .json({ message: [{ key: "error", value: "Not authorized for this course" }] });
     }
 
     // WHICH SESSIONS HAPPENED — course, batch and date range. Deliberately not
@@ -839,9 +865,20 @@ exports.getAttendanceOverview = async (req, res) => {
     // Read-only widening: L&D Head / Sub Head see every course here (they do
     // not get marking rights — those still check isAdminUser in save/reset).
     const viewer = admin || (await isManagerViewer(req.user));
+    // A POC is a read-only viewer too, but of ITS OWN courses only — it is not
+    // in the institution-wide `viewer` tier.
+    const pocViewer = !!req.pocScope?.isPoc;
     const uid = String(req.user?._id || "");
 
-    const courses = await CourseStructure.find({})
+    // `institution` was missing entirely here: this listing used to return
+    // every course in the DATABASE, across all institutions, to any admin or
+    // manager-tier viewer. Adding it closes a cross-tenant leak that predates
+    // POC scoping; the POC branch narrows further to its enrolled courses.
+    const courses = await CourseStructure.find(
+      pocViewer
+        ? { institution: req.user.institution, _id: { $in: req.pocScope.courseIds } }
+        : { institution: req.user.institution }
+    )
       .select(
         "courseName courseCode category serviceModal clientName coursePath institution clientId batchAndParticipants"
       )
@@ -966,7 +1003,12 @@ exports.getAttendanceOverview = async (req, res) => {
         trainingEnd: w.exists ? w.endFor(String(b._id)) || "" : "",
       }));
 
-      if (!viewer) {
+      // A POC skips the batch narrowing: the COURSE is its unit of scope, and
+      // the course list above is already restricted to the ones it is enrolled
+      // in. Filtering to `mine` on top would hide the other batches of a course
+      // the POC legitimately oversees — a trainer serves one batch, a point of
+      // contact answers for the whole engagement.
+      if (!viewer && !pocViewer) {
         batches = batches.filter((b) => b.mine);
         // Not in any batch of this course → the course does not exist for
         // this user's attendance world.
@@ -1002,9 +1044,12 @@ exports.getAttendanceOverview = async (req, res) => {
 
     return res.status(200).json({
       message: [{ key: "success", value: "Attendance overview" }],
-      // Three tiers: admin (marks everything), viewer (sees everything,
-      // read-only — POC / L&D Head / Sub Head), staff (own batches).
-      role: admin ? "admin" : viewer ? "viewer" : "staff",
+      // Three tiers: admin (marks everything), viewer (read-only — L&D Head /
+      // Sub Head institution-wide, POC over its own courses), staff (own
+      // batches). A POC reports as "viewer" because that is the read-only
+      // contract the client already renders; what differs is the row set it
+      // was given, not what it may do with it.
+      role: admin ? "admin" : viewer || pocViewer ? "viewer" : "staff",
       data,
     });
   } catch (err) {

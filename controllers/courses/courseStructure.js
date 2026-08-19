@@ -11,6 +11,7 @@ const SubModule1 = mongoose.model("SubModule1");
 const Topic1 = mongoose.model("Topic1");
 const SubTopic1 = mongoose.model("SubTopic1");
 const { createClient } = require("@supabase/supabase-js");
+const { pocCourseFilter, scopeHasCourse } = require("../../utils/pocScope");
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabaseUrl = process.env.SUPABASE_URL;
 
@@ -1221,8 +1222,14 @@ exports.getCourseStructure = async (req, res) => {
       summaryParam === "enrolled";
     const withEnrollment = summaryParam === "enrolled";
 
+    // `{}` for every role except a POC, which is narrowed to the courses it is
+    // actually enrolled in. Applied to BOTH branches below, and orthogonal to
+    // the `?summary=` projection — scoping decides which rows come back, the
+    // projection only decides how much of each row.
+    const scopeMatch = pocCourseFilter(req.pocScope);
+
     const courseStructures = summary
-      ? await CourseStructure.find({ institution: req.user.institution })
+      ? await CourseStructure.find({ institution: req.user.institution, ...scopeMatch })
           .select(
             "courseName courseCode courseImage clientId clientName mappingId coursePath " +
             "serviceType serviceModal category courseLevel courseDuration " +
@@ -1236,6 +1243,7 @@ exports.getCourseStructure = async (req, res) => {
           .lean()
       : await CourseStructure.find({
           institution: req.user.institution,
+          ...scopeMatch,
         })
           .populate({
             path: 'batchAndParticipants.users.user',
@@ -1565,6 +1573,16 @@ exports.getCourseStructureById = async (req, res) => {
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({
         message: [{ key: "error", value: "Invalid course ID format" }],
+      });
+    }
+
+    // Membership test rather than a merged filter: the query below pins `_id`,
+    // so spreading a scope filter in would overwrite one of the two keys.
+    // Reuses the existing 404 so an out-of-scope course is indistinguishable
+    // from a missing one.
+    if (!scopeHasCourse(req.pocScope, id)) {
+      return res.status(404).json({
+        message: [{ key: "error", value: "Course structure not found" }],
       });
     }
 
@@ -2068,6 +2086,10 @@ exports.getCourseBatches = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid courseId" });
     }
 
+    if (!scopeHasCourse(req.pocScope, courseId)) {
+      return res.status(404).json({ success: false, message: "Course not found" });
+    }
+
     const course = await CourseStructure.findById(courseId)
       // mappingId is here so the Course Participants page can build its
       // breadcrumb from this one response. It used to pull the entire course
@@ -2152,7 +2174,12 @@ exports.getCourseBatches = async (req, res) => {
       }
     }
 
-    if (mutated) {
+    // This is a GET that writes — it backfills missing batch entries. The
+    // method-based write ban cannot catch that, so a POC is excluded here
+    // explicitly: the response below is still built from the in-memory
+    // backfill, so the POC sees the same batches, it just doesn't persist
+    // them.
+    if (mutated && !req.pocScope?.isPoc) {
       course.updatedAt = new Date();
       await course.save();
     }
@@ -2900,6 +2927,13 @@ exports.getApprovalHierarchy = async (req, res) => {
     const { courseId } = req.params;
     if (!mongoose.Types.ObjectId.isValid(courseId)) {
       return res.status(400).json({ success: false, message: "Invalid courseId" });
+    }
+
+    // This response also carries the institution's roles and the users holding
+    // them, so an unscoped call would hand a POC a staff directory for a course
+    // it has nothing to do with.
+    if (!scopeHasCourse(req.pocScope, courseId)) {
+      return res.status(404).json({ success: false, message: "Course not found" });
     }
 
     // No roster populate here: the hydrated participant list (potentially
