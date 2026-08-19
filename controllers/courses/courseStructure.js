@@ -1985,10 +1985,75 @@ exports.batchAddParticipants = async (req, res) => {
  
     course.updatedAt = new Date();
     course.updatedBy = req.user?.id || 'system';
- 
+
     // Save the course
     await course.save();
- 
+
+    // Notify the newly-enrolled participants. Mirrors the removal-side
+    // notifications elsewhere in this file, with a `metadata.redirectUrl` that
+    // deep-links straight to the course's Upload Resources page — which is
+    // what a POC actually needs to open when they see "you've been added to
+    // course X". `redirectUrl` is the app-wide contract already read by
+    // NotificationsPage (features/notifications/NotificationsPage.tsx:369) and
+    // now by NotificationBell too, so this works from either surface.
+    //
+    // Best-effort: any failure here must NOT rollback the enrollment above.
+    try {
+      const uploadUrl = `/lms/pages/courses/uploadcourseresources?courseId=${String(courseId)}`;
+      const notification = {
+        title: "Enrolled in a course",
+        message: `You have been enrolled in "${course.courseName}"`,
+        type: "enrollment",
+        relatedEntity: "enrollment",
+        relatedEntityId: courseId,
+        enrolledBy: req.user?._id || null,
+        metadata: new Map([
+          ["redirectUrl", uploadUrl],
+          ["courseId", String(courseId)],
+          ["courseName", course.courseName || ""],
+          ["courseCode", course.courseCode || ""],
+          ["batchName", targetBatch.batchName || ""],
+          ["enrolledBy", req.user?.email || "system"],
+          ["enrolledAt", new Date().toISOString()],
+        ]),
+      };
+
+      await Promise.all(
+        usersToAdd.map(async (u) => {
+          try {
+            const userDoc = await User.findById(u.user);
+            if (userDoc && typeof userDoc.addNotification === "function") {
+              await userDoc.addNotification(notification);
+            } else {
+              await User.findByIdAndUpdate(u.user, {
+                $push: {
+                  notifications: {
+                    $each: [{
+                      title: notification.title,
+                      message: notification.message,
+                      type: notification.type,
+                      relatedEntity: notification.relatedEntity,
+                      relatedEntityId: notification.relatedEntityId,
+                      enrolledBy: notification.enrolledBy,
+                      metadata: notification.metadata,
+                      isRead: false,
+                      createdAt: new Date(),
+                    }],
+                    $position: 0,
+                  },
+                },
+                $inc: { unreadNotificationCount: 1 },
+              });
+            }
+          } catch (notifyErr) {
+            console.error(`Enrollment notification failed for user ${u.user}:`, notifyErr.message);
+          }
+        })
+      );
+    } catch (bulkNotifyErr) {
+      console.error("Enrollment notifications block failed:", bulkNotifyErr.message);
+    }
+
     // Fetch updated course to get all batches. Only the roster array is
     // read by the response formatter below — no need to rehydrate the whole
     // course doc with its config subtrees.
