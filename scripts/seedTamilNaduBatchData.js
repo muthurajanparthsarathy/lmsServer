@@ -20,7 +20,7 @@ const jwt = require("jsonwebtoken");
 const fs = require("fs");
 const path = require("path");
 
-const BASE = "http://localhost:5533";
+const BASE = "https://lmsserver-yeve.onrender.com";
 const INSTITUTION = "6909820ad674bf8e94c19ce6";
 const ADMIN_ID = "6a46063688dae7ba0df3b1cc"; // batch@gmail.com
 const ROLE_STUDENT = "690b37c20ebae58e282755fc";
