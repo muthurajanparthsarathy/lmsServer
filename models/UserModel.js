@@ -108,11 +108,26 @@ const evaluationBreakdownAiTestCaseSchema = new mongoose.Schema({
   comment: { type: String, default: '' }, // AI's 1-line reason
 }, { _id: false });
 
+// Per-test-case row inside evaluationBreakdown.testcase.cases. Written by the
+// student editors / rerun at scoring time so the Review page can show the
+// trainer WHICH cases failed (input/expected/got), not just "passed 1/2".
+const evaluationBreakdownTestCaseSchema = new mongoose.Schema({
+  index: { type: Number },               // 0-based position in the question's testCases
+  passed: { type: Boolean, default: false },
+  hidden: { type: Boolean, default: false }, // question flagged it isHidden
+  input: { type: String, default: '' },
+  expectedOutput: { type: String, default: '' },
+  actualOutput: { type: String, default: '' }, // what the student's code printed
+}, { _id: false });
+
 const evaluationBreakdownSchema = new mongoose.Schema({
   method: { type: String, enum: ['manual', 'testcase', 'ai'] },
   testcase: {
     passed: { type: Number, default: 0 },
     total: { type: Number, default: 0 },
+    // Absent on submissions scored before this field existed — Review falls
+    // back to counts-only display.
+    cases: { type: [evaluationBreakdownTestCaseSchema], default: [] },
   },
   ai: {
     perCriterionMax: { type: Number, default: 0 },

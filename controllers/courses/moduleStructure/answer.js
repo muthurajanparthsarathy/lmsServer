@@ -378,9 +378,22 @@ exports.submitAnswer = async (req, res) => {
       if (!ALLOWED_METHOD.has(b.method)) return null; // reject unknown method outright
       const out = { method: b.method };
       if (b.method === 'testcase' && b.testcase && typeof b.testcase === 'object') {
+        // Per-case rows (which case failed + input/expected/got) — capped at
+        // 50 rows / 2000-char strings like the AI test-case list, so the
+        // answer doc stays bounded. Older clients that only send counts still
+        // sanitize fine (cases → []).
+        const tcCases = Array.isArray(b.testcase.cases) ? b.testcase.cases : [];
         out.testcase = {
           passed: Number(b.testcase.passed) || 0,
           total: Number(b.testcase.total) || 0,
+          cases: tcCases.slice(0, 50).map((t, i) => ({
+            index: Number(t?.index) === Number(t?.index) ? Number(t.index) : i,
+            passed: !!t?.passed,
+            hidden: !!t?.hidden,
+            input: typeof t?.input === 'string' ? t.input.slice(0, 2000) : '',
+            expectedOutput: typeof t?.expectedOutput === 'string' ? t.expectedOutput.slice(0, 2000) : '',
+            actualOutput: typeof t?.actualOutput === 'string' ? t.actualOutput.slice(0, 2000) : '',
+          })),
         };
       }
       if (b.method === 'ai' && b.ai && typeof b.ai === 'object') {
@@ -1567,7 +1580,20 @@ exports.submitMultipleFiles = async (req, res) => {
       if (!ALLOWED_METHOD_MF.has(b.method)) return null;
       const out = { method: b.method };
       if (b.method === 'testcase' && b.testcase && typeof b.testcase === 'object') {
-        out.testcase = { passed: Number(b.testcase.passed) || 0, total: Number(b.testcase.total) || 0 };
+        // Same per-case cap as the other sanitizeBreakdown copies in this file.
+        const tcCases = Array.isArray(b.testcase.cases) ? b.testcase.cases : [];
+        out.testcase = {
+          passed: Number(b.testcase.passed) || 0,
+          total: Number(b.testcase.total) || 0,
+          cases: tcCases.slice(0, 50).map((t, i) => ({
+            index: Number(t?.index) === Number(t?.index) ? Number(t.index) : i,
+            passed: !!t?.passed,
+            hidden: !!t?.hidden,
+            input: typeof t?.input === 'string' ? t.input.slice(0, 2000) : '',
+            expectedOutput: typeof t?.expectedOutput === 'string' ? t.expectedOutput.slice(0, 2000) : '',
+            actualOutput: typeof t?.actualOutput === 'string' ? t.actualOutput.slice(0, 2000) : '',
+          })),
+        };
       }
       if (b.method === 'ai' && b.ai && typeof b.ai === 'object') {
         const crit = Array.isArray(b.ai.criteria) ? b.ai.criteria : [];
@@ -2687,9 +2713,22 @@ exports.rerunSubmissions = async (req, res) => {
       if (!ALLOWED_METHOD.has(b.method)) return null;
       const out = { method: b.method };
       if (b.method === 'testcase' && b.testcase && typeof b.testcase === 'object') {
+        // Per-case rows (which case failed + input/expected/got) — capped at
+        // 50 rows / 2000-char strings like the AI test-case list, so the
+        // answer doc stays bounded. Older clients that only send counts still
+        // sanitize fine (cases → []).
+        const tcCases = Array.isArray(b.testcase.cases) ? b.testcase.cases : [];
         out.testcase = {
           passed: Number(b.testcase.passed) || 0,
           total: Number(b.testcase.total) || 0,
+          cases: tcCases.slice(0, 50).map((t, i) => ({
+            index: Number(t?.index) === Number(t?.index) ? Number(t.index) : i,
+            passed: !!t?.passed,
+            hidden: !!t?.hidden,
+            input: typeof t?.input === 'string' ? t.input.slice(0, 2000) : '',
+            expectedOutput: typeof t?.expectedOutput === 'string' ? t.expectedOutput.slice(0, 2000) : '',
+            actualOutput: typeof t?.actualOutput === 'string' ? t.actualOutput.slice(0, 2000) : '',
+          })),
         };
       }
       if (b.method === 'ai' && b.ai && typeof b.ai === 'object') {

@@ -57,6 +57,14 @@ const orderingItemSchema = new mongoose.Schema({
 
 const questionsSchema = new mongoose.Schema({
   // Common Fields
+
+  // Course-specific scope. When set, this question belongs to a single course's
+  // bank and only surfaces in that course's Question Bank view (Course Specific
+  // tab → Manage). When unset (default), the question is "general" and lives
+  // in the institution-wide bank listing. String, not ObjectId ref, because
+  // legacy course-structure records key on strings and we accept either.
+  courseId: { type: String, default: null, index: true },
+
   questionCategory: {
     type: String,
     required: true,

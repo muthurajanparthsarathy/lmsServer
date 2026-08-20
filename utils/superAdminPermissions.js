@@ -109,14 +109,39 @@ const SUPER_ADMIN_PERMISSIONS = [
     order: 7,
   },
   {
-    permissionName: "Question Banks",
+    // Question Bank ▸ Internal. Keeps the original `questionbanks` key, so
+    // every already-issued grant and every route/link is untouched — only the
+    // display name narrowed from "Question Banks" now that External is its own
+    // grantable page below. Functions match `admin-question-banks` in the
+    // client's config/permissions.tree.ts, which is what the UI checks.
+    permissionName: "Internal Questions",
     permissionKey: "questionbanks",
-    permissionFunctionality: ["Add Question", "Edit Question", "Delete Question", "Approve"],
-    icon: "FileText",
+    permissionFunctionality: [
+      "Create Question", "View Details", "Edit", "Delete", "Deactivate",
+    ],
+    icon: "Library",
     color: "cyan",
-    description: "Manage question banks",
+    description: "Institution's own question bank — one document per tenant",
     isActive: true,
     order: 8,
+  },
+  {
+    // Question Bank ▸ External — the shared, platform-imported library
+    // (~5k Exercism/CP questions) that every tenant reads. No functions: the
+    // page role-gates its own writes to admin / super_admin in-file, so this
+    // permission decides only whether the rail entry appears.
+    //
+    // NOT at /lms/pages/questionbanksexternal — see PERMISSION_ROUTES in
+    // client/src/app/lms/shared/navRoutes.ts, which maps it to
+    // /lms/pages/questionbanks/external for every shell and the route gate.
+    permissionName: "External Questions",
+    permissionKey: "questionbanksexternal",
+    permissionFunctionality: [],
+    icon: "Globe",
+    color: "cyan",
+    description: "Shared platform-imported bank, common to every institution",
+    isActive: true,
+    order: 9,
   },
   {
     permissionName: "Grades",
@@ -126,7 +151,7 @@ const SUPER_ADMIN_PERMISSIONS = [
     color: "yellow",
     description: "Manage grades",
     isActive: true,
-    order: 9,
+    order: 10,
   },
   {
     permissionName: "Attendance Management",
@@ -139,7 +164,7 @@ const SUPER_ADMIN_PERMISSIONS = [
     color: "purple",
     description: "Manage attendance records",
     isActive: true,
-    order: 10,
+    order: 11,
   },
   {
     permissionName: "Notifications",
@@ -149,7 +174,7 @@ const SUPER_ADMIN_PERMISSIONS = [
     color: "red",
     description: "Manage notifications",
     isActive: true,
-    order: 11,
+    order: 12,
   },
   {
     permissionName: "Audit Logs",
@@ -159,7 +184,7 @@ const SUPER_ADMIN_PERMISSIONS = [
     color: "gray",
     description: "View activity and login logs",
     isActive: true,
-    order: 12,
+    order: 13,
   },
   {
     permissionName: "Dynamic Field Settings",
@@ -171,7 +196,7 @@ const SUPER_ADMIN_PERMISSIONS = [
     color: "gray",
     description: "Configure dynamic fields",
     isActive: true,
-    order: 13,
+    order: 14,
   },
   {
     permissionName: "Profiles",
@@ -181,7 +206,7 @@ const SUPER_ADMIN_PERMISSIONS = [
     color: "pink",
     description: "Profile management",
     isActive: true,
-    order: 14,
+    order: 15,
   },
   {
     // Admin-side review queue for assessments/assignments that require approval
@@ -195,7 +220,31 @@ const SUPER_ADMIN_PERMISSIONS = [
     color: "orange",
     description: "Review and approve assessments and assignments before students see them",
     isActive: true,
-    order: 15,
+    order: 16,
+  },
+  {
+    // Point-of-Contact console. UNLIKE every other entry here, its page is NOT
+    // at /lms/pages/<permissionKey> — it lives at /lms/pages/poc/dashboard.
+    // The client maps the key to that route in ONE place (PERMISSION_ROUTES in
+    // client/src/app/lms/shared/ui/navItems.ts), which the sidebar, the
+    // command palette and the route gate all read.
+    //
+    // The key ends in "dashboard", so saveRolePermissions treats it as
+    // dashboard-family: the institution/role matrix never propagates it, and
+    // each user keeps whichever dashboard they already hold. Granting it is a
+    // per-user action through the LMS Assign Permission modal
+    // (Admin ▸ POC Dashboard), which is where a POC gets it.
+    permissionName: "POC Dashboard",
+    permissionKey: "pocdashboard",
+    // Intentionally empty, matching `admin-poc-dashboard` in the client's
+    // config/permissions.tree.ts: the dashboard is granted whole, so it has no
+    // per-function toggles — the same shape as Admin Dashboard.
+    permissionFunctionality: [],
+    icon: "LayoutDashboard",
+    color: "orange",
+    description: "Point-of-Contact console — courses, learners, clients and services inside the POC's own scope",
+    isActive: true,
+    order: 17,
   },
 ];
 

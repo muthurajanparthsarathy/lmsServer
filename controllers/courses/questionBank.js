@@ -392,6 +392,10 @@ exports.createQuestionBank = async (req, res) => {
         // Build base MCQ question object
         processedQuestion = {
           _id: new mongoose.Types.ObjectId(),
+          // Course-scoped bank: when the client sends a courseId (from the
+          // Course Specific tab's Manage view), we pin the question to that
+          // course so the scoped list shows it. Falsy → general bank.
+          ...(question.courseId ? { courseId: String(question.courseId) } : {}),
           questionCategory: question.questionCategory || 'General',
           questionType: 'mcq',
           isActive: question.isActive !== undefined ? question.isActive : true,
@@ -501,6 +505,7 @@ exports.createQuestionBank = async (req, res) => {
 
         processedQuestion = {
           _id: new mongoose.Types.ObjectId(),
+          ...(question.courseId ? { courseId: String(question.courseId) } : {}),
           questionCategory: question.questionCategory || 'Programming',
           // Specific sub-type: programming (core) / frontend / database.
           questionType: (question.questionType || 'programming').toLowerCase(),
@@ -691,6 +696,9 @@ exports.getAllQuestionsbank = async (req, res) => {
       difficulty,
       isActive,
       page, limit, search, createdBy, marks, createdAfter,
+      // courseId: '' or absent → the General bank (no course pinned)
+      // courseId: '<id>'       → only questions pinned to that course
+      courseId,
     } = req.query;
 
     const institutionId = req.user?.institution?._id || req.user?.institution;
@@ -797,6 +805,15 @@ exports.getAllQuestionsbank = async (req, res) => {
     const cutoff = Number(createdAfter) > 0 ? Number(createdAfter) : 0;
 
     const rows = all.filter((q) => {
+      // Course scope: General tab requests without courseId → drop anything
+      // pinned to a course; Course Specific with a courseId → keep only that
+      // course's questions. String coerce to survive legacy string/ObjectId
+      // shapes on either side.
+      if (courseId) {
+        if (String(q.courseId || '') !== String(courseId)) return false;
+      } else {
+        if (q.courseId) return false;
+      }
       // Same predicates, in the same order, as `filteredQuestions`.
       if (questionType) {
         // The dropdown offers the broad buckets MCQ / Programming, and

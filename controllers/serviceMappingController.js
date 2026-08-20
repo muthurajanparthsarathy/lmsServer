@@ -280,7 +280,7 @@ async function getMappingsPaginated(req, res, institutionId) {
         localField: "client",
         foreignField: "_id",
         as: "_client",
-        pipeline: [{ $project: { clientCompany: 1, status: 1, type: 1 } }],
+        pipeline: [{ $project: { clientCompany: 1, status: 1, type: 1, businessModel: 1 } }],
       },
     },
     {
@@ -289,7 +289,7 @@ async function getMappingsPaginated(req, res, institutionId) {
         localField: "partnerInstitutions",
         foreignField: "_id",
         as: "_partners",
-        pipeline: [{ $project: { clientCompany: 1, status: 1, type: 1 } }],
+        pipeline: [{ $project: { clientCompany: 1, status: 1, type: 1, businessModel: 1 } }],
       },
     },
   ];
@@ -1220,8 +1220,8 @@ const serviceMappingController = {
         institution: institutionId,
         ...pocMappingFilter(req.pocScope),
       })
-        .populate("client", "clientCompany status type")
-        .populate("partnerInstitutions", "clientCompany status type")
+        .populate("client", "clientCompany status type businessModel")
+        .populate("partnerInstitutions", "clientCompany status type businessModel")
         .sort({ createdAt: -1 })
         .lean();
 
@@ -1261,8 +1261,8 @@ const serviceMappingController = {
         _id: mappingId,
         institution: institutionId,
       })
-        .populate("client", "clientCompany status type")
-        .populate("partnerInstitutions", "clientCompany status type");
+        .populate("client", "clientCompany status type businessModel")
+        .populate("partnerInstitutions", "clientCompany status type businessModel");
 
       if (!mapping) {
         return res.status(404).json({ success: false, message: " not found" });
@@ -1301,8 +1301,8 @@ const serviceMappingController = {
         institution: institutionId,
         client: clientId,
       })
-        .populate("client", "clientCompany status type")
-        .populate("partnerInstitutions", "clientCompany status type")
+        .populate("client", "clientCompany status type businessModel")
+        .populate("partnerInstitutions", "clientCompany status type businessModel")
         .sort({ createdAt: -1 })
         .lean();
 
