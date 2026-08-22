@@ -5,6 +5,13 @@ const Topic1 = mongoose.model('Topic1');
 const SubTopic1 = mongoose.model('SubTopic1');
 const User = require("../../../models/UserModel");
 const CourseStructure = require("../../../models/Courses/courseStructureModal");
+// ExamSession — one row per (assessment, student) once the student joins the
+// test. Never deleted (submittedAt just flips), so the presence of any row
+// for an assessmentId is the "someone has ever started this test" signal.
+// Read here to stamp `hasParticipants` onto each row of the You_Do exercise
+// list, so the client can hide the "Live Dashboard" menu entry until the
+// first student joins and keep it visible forever afterwards.
+const ExamSession = require("../../../models/Courses/moduleStructure/ExamSessionModel");
 // Phase 6 — Question Bank model used when `saveToBank` is true on save.
 const QuestionBank = require("../../../models/Courses/QuestionbankModal");
 const {
@@ -10157,6 +10164,33 @@ exports.getYouDoExercises = async (req, res) => {
 
     // Remove temporary sort fields from response
     const cleanExercises = paginatedExercises.map(({ sortCreatedAt, sortUpdatedAt, ...rest }) => rest);
+
+    // ── Stamp `hasParticipants` on each row ─────────────────────────────
+    // One `distinct` over the small page slice — cheap and scales with the
+    // page size, not the total ExamSession count. Presence in the returned
+    // set means "at least one student has ever joined this test". The client
+    // gates the Live Dashboard menu entry on this bit; ExamSession rows are
+    // never deleted (submittedAt flips but the row stays), so this is
+    // permanently true once flipped — matches the product rule "once
+    // started, never hide the Dashboard entry even after the schedule ends".
+    try {
+      const pageIds = cleanExercises
+        .map(ex => String(ex?._id || ex?.id || ""))
+        .filter(Boolean);
+      if (pageIds.length > 0) {
+        const withParticipants = new Set(
+          (await ExamSession.distinct("assessmentId", { assessmentId: { $in: pageIds } })).map(String)
+        );
+        for (const ex of cleanExercises) {
+          ex.hasParticipants = withParticipants.has(String(ex._id || ex.id || ""));
+        }
+      }
+    } catch (e) {
+      // Never let this enrichment break the primary list response — if the
+      // ExamSession lookup fails we ship the exercises without the flag and
+      // the client falls back to "Dashboard hidden" (the safer default).
+      console.warn("hasParticipants stamp failed:", e.message);
+    }
 
     return res.json({
       message: [{ key: "success", value: "Exercises retrieved successfully" }],
