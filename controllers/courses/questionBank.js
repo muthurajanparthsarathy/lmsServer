@@ -985,36 +985,27 @@ exports.getAllOtherPlatformQuestions = async (req, res) => {
     if (difficulty) scopeQuery.mcqQuestionDifficulty = difficulty;
     if (isActive !== undefined) scopeQuery.isActive = isActive === 'true';
 
-    const scope = await Question.OtherPlatformQuestion
-      .find(scopeQuery)
-      .sort({ createdAt: -1 });
+    // Newest-first, with an `_id` tie-break. The tie-break is what makes a
+    // skip/limit slice STABLE: without it two rows sharing a createdAt have no
+    // defined relative order, so the same document can show up on page 2 and
+    // again on page 3. `_id` descends with createdAt (ObjectIds increase with
+    // insertion), so the visible order is unchanged — it is merely no longer
+    // arbitrary. Served by the { createdAt: -1, _id: -1 } index on the model.
+    const NEWEST_FIRST = { createdAt: -1, _id: -1 };
 
-    // Legacy path — unchanged response shape.
+    // Legacy path — unchanged response shape. Still reads the whole scope,
+    // because that IS the response: a caller that passes no `page` is asking
+    // for every matching question.
     if (page === undefined) {
+      const all = await Question.OtherPlatformQuestion
+        .find(scopeQuery)
+        .sort(NEWEST_FIRST);
       return res.status(200).json({
         success: true,
-        total: scope.length,
+        total: all.length,
         institution: null,
-        questions: scope
+        questions: all
       });
-    }
-
-    const problemTypeCounts = {};
-    const difficultyCounts = { easy: 0, medium: 0, hard: 0 };
-    const topicSet = new Map();
-    const tagSet = new Map();
-    for (const q of scope) {
-      const pt = q.problemType || '';
-      if (pt) problemTypeCounts[pt] = (problemTypeCounts[pt] || 0) + 1;
-      difficultyCounts[pickerDifficulty(q)] += 1;
-      for (const t of asArray(q.topics)) {
-        const k = String(t || '').trim().toLowerCase();
-        if (k && !topicSet.has(k)) topicSet.set(k, String(t));
-      }
-      for (const t of asArray(q.tags)) {
-        const k = String(t || '').trim().toLowerCase();
-        if (k && !tagSet.has(k)) tagSet.set(k, String(t));
-      }
     }
 
     const term = String(search || '').trim().toLowerCase();
@@ -1024,33 +1015,103 @@ exports.getAllOtherPlatformQuestions = async (req, res) => {
     const wantedTag = String(tag || '').trim().toLowerCase();
     const wantedDiff = String(req.query.railDifficulty || '').trim().toLowerCase();
 
-    let rows = scope.filter((q) => {
-      if (wantedPts.length > 0 && !wantedPts.includes(q.problemType || '')) return false;
-      if (wantedDiff && pickerDifficulty(q) !== wantedDiff) return false;
-      if (wantedTopic && !asArray(q.topics).some(t => String(t).trim().toLowerCase() === wantedTopic)) return false;
-      if (wantedTag && !asArray(q.tags).some(t => String(t).trim().toLowerCase() === wantedTag)) return false;
-      if (!term) return true;
-      return (
-        pickerTitle(q).toLowerCase().includes(term) ||
-        pickerDescription(q).toLowerCase().includes(term) ||
-        pickerQbId(q).toLowerCase().includes(term) ||
-        String(q.problemType || '').toLowerCase().includes(term) ||
-        asArray(q.topics).some(t => String(t).toLowerCase().includes(term)) ||
-        asArray(q.tags).some(t => String(t).toLowerCase().includes(term))
-      );
-    });
-
-    // 'relevance' keeps the newest-first order established above.
-    if (sort === 'title') {
-      rows = [...rows].sort((a, b) => pickerTitle(a).localeCompare(pickerTitle(b)));
-    } else if (sort === 'difficulty') {
-      const rank = { easy: 0, medium: 1, hard: 2 };
-      rows = [...rows].sort((a, b) => rank[pickerDifficulty(a)] - rank[pickerDifficulty(b)]);
-    }
-
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const perPage = Math.min(200, Math.max(1, parseInt(limit, 10) || 25));
     const start = (pageNum - 1) * perPage;
+
+    // ── Which read does this request actually need? ──────────────────────────
+    // Two things used to force reading the ENTIRE type-scoped set on every
+    // paginated request — 5148 hydrated documents, ~9.2 MB — to return ten rows:
+    //
+    //   1. The picker's filter-rail facets are counted over the whole scope.
+    //   2. The rail's own predicates (search / problemTypes / railDifficulty /
+    //      topic / tag) and its title & difficulty sorts run in JS here, over
+    //      DERIVED values — `pickerTitle` flattens block arrays and strips HTML,
+    //      `pickerQbId` is computed from the _id — which no Mongo predicate
+    //      reproduces without drifting from what the picker itself matches.
+    //
+    // Neither applies to the ADMIN listing: it renders none of those facets and
+    // offers none of those rail filters. It says so with `facets=admin`, and a
+    // page then becomes an indexed skip/limit plus a count — the same shape as
+    // the paginated user directory — reading ten documents and no more.
+    //
+    // The picker's own requests are untouched: they don't send the flag, so
+    // they take the scan path below exactly as before.
+    const adminOnlyFacets = String(req.query.facets || '') === 'admin';
+    const needsScopeScan = !adminOnlyFacets
+      || Boolean(term) || wantedPts.length > 0 || Boolean(wantedDiff)
+      || Boolean(wantedTopic) || Boolean(wantedTag)
+      || sort === 'title' || sort === 'difficulty';
+
+    const problemTypeCounts = {};
+    const difficultyCounts = { easy: 0, medium: 0, hard: 0 };
+    const topicSet = new Map();
+    const tagSet = new Map();
+    let pageRows;
+    let total;
+    let scopeTotal;
+
+    if (!needsScopeScan) {
+      // Nothing is filtered or sorted in JS on this path, so Mongo does all of
+      // it. The count and the page don't depend on each other — one round trip.
+      const [count, rows] = await Promise.all([
+        Question.OtherPlatformQuestion.countDocuments(scopeQuery),
+        Question.OtherPlatformQuestion
+          .find(scopeQuery)
+          .sort(NEWEST_FIRST)
+          .skip(start)
+          .limit(perPage),
+      ]);
+      total = count;
+      scopeTotal = count;
+      pageRows = rows;
+    } else {
+      const scope = await Question.OtherPlatformQuestion
+        .find(scopeQuery)
+        .sort(NEWEST_FIRST);
+
+      for (const q of scope) {
+        const pt = q.problemType || '';
+        if (pt) problemTypeCounts[pt] = (problemTypeCounts[pt] || 0) + 1;
+        difficultyCounts[pickerDifficulty(q)] += 1;
+        for (const t of asArray(q.topics)) {
+          const k = String(t || '').trim().toLowerCase();
+          if (k && !topicSet.has(k)) topicSet.set(k, String(t));
+        }
+        for (const t of asArray(q.tags)) {
+          const k = String(t || '').trim().toLowerCase();
+          if (k && !tagSet.has(k)) tagSet.set(k, String(t));
+        }
+      }
+
+      let rows = scope.filter((q) => {
+        if (wantedPts.length > 0 && !wantedPts.includes(q.problemType || '')) return false;
+        if (wantedDiff && pickerDifficulty(q) !== wantedDiff) return false;
+        if (wantedTopic && !asArray(q.topics).some(t => String(t).trim().toLowerCase() === wantedTopic)) return false;
+        if (wantedTag && !asArray(q.tags).some(t => String(t).trim().toLowerCase() === wantedTag)) return false;
+        if (!term) return true;
+        return (
+          pickerTitle(q).toLowerCase().includes(term) ||
+          pickerDescription(q).toLowerCase().includes(term) ||
+          pickerQbId(q).toLowerCase().includes(term) ||
+          String(q.problemType || '').toLowerCase().includes(term) ||
+          asArray(q.topics).some(t => String(t).toLowerCase().includes(term)) ||
+          asArray(q.tags).some(t => String(t).toLowerCase().includes(term))
+        );
+      });
+
+      // 'relevance' keeps the newest-first order established above.
+      if (sort === 'title') {
+        rows = [...rows].sort((a, b) => pickerTitle(a).localeCompare(pickerTitle(b)));
+      } else if (sort === 'difficulty') {
+        const rank = { easy: 0, medium: 1, hard: 2 };
+        rows = [...rows].sort((a, b) => rank[pickerDifficulty(a)] - rank[pickerDifficulty(b)]);
+      }
+
+      scopeTotal = scope.length;
+      total = rows.length;
+      pageRows = rows.slice(start, start + perPage);
+    }
 
     // Admin-side facets: whole-collection totals, filter-independent, for the
     // External Question Bank page's header chips and its Category / Created By
@@ -1106,12 +1167,12 @@ exports.getAllOtherPlatformQuestions = async (req, res) => {
     const sortLabel = (s) => String(s || '').trim();
     return res.status(200).json({
       success: true,
-      total: rows.length,
-      scopeTotal: scope.length,
+      total,
+      scopeTotal,
       page: pageNum,
       limit: perPage,
       institution: null,
-      questions: rows.slice(start, start + perPage),
+      questions: pageRows,
       facets: {
         problemTypeCounts,
         difficultyCounts,

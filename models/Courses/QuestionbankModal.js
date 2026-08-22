@@ -289,6 +289,13 @@ const OtherPlatformBank = mongoose.model("OtherPlatformQuestionBank", otherPlatf
 // key — exercises store it in `bankQuestionId`).
 const otherPlatformQuestionSchema = questionsSchema.clone();
 otherPlatformQuestionSchema.index({ createdAt: -1 });
+// Compound, for the paginated listing's newest-first sort. The single-field
+// index above orders by createdAt but leaves rows that SHARE a createdAt in no
+// defined order, which a skip/limit slice cannot tolerate — a tied row can be
+// served on two consecutive pages, or on neither. Sorting by { createdAt, _id }
+// makes the order total; this index is what keeps that sort a cheap index walk
+// instead of a blocking in-memory sort of the whole collection.
+otherPlatformQuestionSchema.index({ createdAt: -1, _id: -1 });
 otherPlatformQuestionSchema.index({ questionType: 1, isActive: 1 });
 otherPlatformQuestionSchema.index({ mcqQuestionDifficulty: 1 });
 otherPlatformQuestionSchema.index({ problemType: 1 });
