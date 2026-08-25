@@ -294,10 +294,19 @@ async function getMappingsPaginated(req, res, institutionId) {
     },
   ];
 
+  // Business model (B2B / B2I / B2C) lives on the CLIENT, not the mapping, so
+  // it can only be matched after the join above — unlike every filter in the
+  // `match` object, which runs before it.
+  if (req.query.businessModel) {
+    pipeline.push({
+      $match: { "_client.businessModel": String(req.query.businessModel) },
+    });
+  }
+
   if (search && String(search).trim()) {
     // The page searched ONE joined string:
-    //   [client.clientCompany, service, year, courseName,
-    //    ...partnerInstitutions[].clientCompany, ...serviceModels]
+    //   [client.clientCompany, year, courseName,
+    //    ...partnerInstitutions[].clientCompany]
     //     .filter(Boolean).join(' ').toLowerCase().includes(q)
     // so a query straddling two fields still has to match. A per-field $or
     // cannot reproduce that, so the haystack is assembled here exactly as the
@@ -312,7 +321,10 @@ async function getMappingsPaginated(req, res, institutionId) {
     //   [clientName, serviceCode, service, year, ...models, ...courseNames]
     // — the only one that searches the courses the mapping TEACHES, which is
     // as common a way to find a mapping as its client or its code.
-    // Anything else is the workspace table's, which does neither.
+    // Anything else is the workspace table's, which does neither — and which
+    // no longer searches `service` or `serviceModels` either: that table groups
+    // by CLIENT and renders no service name, only a count, so a service hit
+    // returned a row with nothing on it that explained the match.
     const scope = req.query.searchScope;
     const haystackParts = scope === "service"
       ? {
@@ -341,12 +353,12 @@ async function getMappingsPaginated(req, res, institutionId) {
           $concatArrays: [
             [
               { $first: "$_client.clientCompany" },
-              "$service",
               "$year",
               "$courseName",
             ],
+            // Partners are clients too, and a partner's name is why its row is
+            // in the list — so they stay.
             { $ifNull: ["$_partners.clientCompany", []] },
-            { $ifNull: ["$serviceModels", []] },
           ],
         };
     pipeline.push({
@@ -564,12 +576,15 @@ async function getMappingFacets(institutionId, scope) {
         localField: "client",
         foreignField: "_id",
         as: "_client",
-        pipeline: [{ $project: { clientCompany: 1 } }],
+        pipeline: [{ $project: { clientCompany: 1, businessModel: 1 } }],
       },
     },
     {
       $facet: {
         years: [{ $group: { _id: "$year" } }],
+        businessModels: [
+          { $group: { _id: { $first: "$_client.businessModel" } } },
+        ],
         services: [{ $group: { _id: "$service" } }],
         serviceModels: [{ $unwind: "$serviceModels" }, { $group: { _id: "$serviceModels" } }],
         clients: [
@@ -632,6 +647,7 @@ async function getMappingFacets(institutionId, scope) {
     years: flat(row?.years).sort((a, b) => String(b).localeCompare(String(a))),
     services: flat(row?.services).sort(),
     serviceModels: flat(row?.serviceModels).sort(),
+    businessModels: flat(row?.businessModels).sort(),
     clients: (row?.clients || [])
       .filter((x) => x._id)
       .map((x) => [String(x._id), x.name || "Untitled"])

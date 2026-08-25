@@ -7,6 +7,15 @@ const ActivityLog = require('../../../models/ActivityLog');
 // exercise is visible at all. `mergeSectionAcrossBatches` walks the shared
 // container AND every batch's, which a plain `doc.pedagogy[category]` cannot.
 const { mergeSectionAcrossBatches, locateExerciseContainer } = require('../../../utils/pedagogyScope');
+// Server-authoritative code judge. When a programming submission arrives, the
+// server re-runs the student's code against the trainer's stored testCases
+// (including hidden ones) and computes score + breakdown here — the client
+// score is treated as an untrusted hint and overwritten. See
+// server/services/codeJudge.js for the loop, driverInjector.js for the
+// LeetCode-style bare-function auto-driver, and questionResolver.js for the
+// authoritative testCases lookup.
+const { judge: judgeCode } = require('../../../services/codeJudge');
+const { loadForJudge } = require('../../../services/questionResolver');
 
 // ── We Do / You Do duration tracking (assignments & assessments) ───────────────
 // Start = first answer interaction (a non-test save opens an 'exercise_start' log).
@@ -238,9 +247,9 @@ exports.submitAnswer = async (req, res) => {
       nodeName = "",
       nodeType = "",
       code = "",
-      score = 0,
+      score: clientScore = 0,
       language = "",
-      status = "attempted",
+      status: clientStatus = "attempted",
       othersFiles: rawOthersFiles,
       attemptLimitEnabled,
       maxAttempts,
@@ -428,7 +437,82 @@ exports.submitAnswer = async (req, res) => {
       }
       return out;
     };
-    const evaluationBreakdown = sanitizeBreakdown(rawEvaluationBreakdown);
+    let evaluationBreakdown = sanitizeBreakdown(rawEvaluationBreakdown);
+    let score = clientScore;
+    let status = clientStatus;
+
+    // ─── Server-authoritative judge (Phase 1 P0) ─────────────────────────
+    // For any submission that carries programming code, re-run the code
+    // against the trainer's stored testCases and OVERWRITE the score,
+    // status, and evaluationBreakdown coming from the client. This closes
+    // the tamper hole where a student could POST `score: 10, status:
+    // "solved"` from the browser and be marked complete without ever
+    // running the code.
+    //
+    // Gated on:
+    //   • non-empty `code`
+    //   • a resolvable `selectedProgrammingLanguage`
+    //   • notionPages absent (Notion journals aren't programming answers)
+    //
+    // If the question can't be resolved (deleted from tree, wrong
+    // nodeType, etc.) we fall through and keep the client values so we
+    // don't lose the submission — a log line surfaces the gap.
+    const canJudge =
+      !!code &&
+      typeof code === 'string' &&
+      !notionPages &&
+      !!selectedProgrammingLanguage;
+    if (canJudge) {
+      try {
+        const q = await loadForJudge({
+          nodeType, nodeId, category, subcategory, exerciseId, questionId,
+        });
+        if (q && Array.isArray(q.testCases) && q.testCases.length > 0) {
+          const judged = await judgeCode({
+            language: selectedProgrammingLanguage || language,
+            files: [{ path: 'main', content: code, isEntryPoint: true }],
+            testCases: q.testCases,
+            functionName: q.functionName,
+            maxMarks: q.maxMarks,
+          });
+          score = judged.score;
+          status = judged.status;
+          evaluationBreakdown = {
+            method: 'testcase',
+            testcase: {
+              passed: judged.passed,
+              total: judged.total,
+              cases: judged.perCase.map((c) => ({
+                index: c.index,
+                passed: c.passed,
+                hidden: c.hidden,
+                // Blank trainer-authored fields (input + expected) on hidden
+                // cases, but KEEP the student's own actualOutput — that's
+                // their own code's output, not a trainer secret. Students
+                // need it to debug format mismatches ("I returned 'true'
+                // but expected 'Even' — different type").
+                input: c.hidden ? '' : c.input,
+                expectedOutput: c.hidden ? '' : c.expectedOutput,
+                actualOutput: c.actualOutput,
+              })),
+            },
+          };
+        } else if (q) {
+          console.warn(
+            `[judge] question ${questionId} has 0 testCases — keeping client-computed score`,
+          );
+        } else {
+          console.warn(
+            `[judge] could not resolve question ${questionId} under ${nodeType}/${nodeId} ${category}/${subcategory}/${exerciseId} — keeping client-computed score`,
+          );
+        }
+      } catch (e) {
+        // Never fail the submission because judging failed — the code is
+        // still saved with the client-computed score, and the trainer can
+        // re-run judgment from the rerun flow.
+        console.error('[judge] error during server-side judge, keeping client score:', e?.message || e);
+      }
+    }
 
     const questionAnswer = {
       questionId: new mongoose.Types.ObjectId(questionId),
@@ -597,11 +681,15 @@ exports.submitAnswer = async (req, res) => {
         exerciseId,
         questionId,
         category,
-        subcategory: (category === 'We_Do' || category === 'You_Do') 
-          ? subcategory 
+        subcategory: (category === 'We_Do' || category === 'You_Do')
+          ? subcategory
           : undefined,
         status,
         score,
+        // Echo the server-authored breakdown so the single-file editor
+        // terminal can render per-case results after Submit without
+        // running any code client-side.
+        evaluationBreakdown,
         isCorrect: questionAnswer.isCorrect,
         user: {
           id: user._id,
@@ -1557,9 +1645,9 @@ exports.submitMultipleFiles = async (req, res) => {
       hasFolders = false,
       folderCount = 0,
       totalFiles = 0,
-      status = "submitted",
+      status: clientStatus = "submitted",
       totalScore = 0,
-      score = 0,
+      score: clientScore = 0,
       feedback = "",
       language = "multi-file",
       isMultiFile = true,
@@ -1624,7 +1712,59 @@ exports.submitMultipleFiles = async (req, res) => {
       }
       return out;
     };
-    const evaluationBreakdown = sanitizeBreakdown(rawEvaluationBreakdown);
+    let evaluationBreakdown = sanitizeBreakdown(rawEvaluationBreakdown);
+    let score = clientScore;
+    let status = clientStatus;
+
+    // ─── Server-authoritative judge (Phase 1 P0, multi-file path) ────────
+    // Multi-file editor's client-side testcase loop is now gone; we re-run
+    // the project here against the trainer's authoritative testCases so
+    // students can't POST a fabricated score. See submitAnswer above for
+    // the single-file mirror of this block.
+    if (Array.isArray(files) && files.length > 0 && selectedProgrammingLanguage) {
+      try {
+        const q = await loadForJudge({
+          nodeType, nodeId, category, subcategory, exerciseId, questionId,
+        });
+        if (q && Array.isArray(q.testCases) && q.testCases.length > 0) {
+          const judgeFiles = files.map((f) => ({
+            path: f.path || `/${f.filename}`,
+            content: f.content || '',
+            isEntryPoint: !!f.isEntryPoint,
+          }));
+          const judged = await judgeCode({
+            language: selectedProgrammingLanguage,
+            files: judgeFiles,
+            testCases: q.testCases,
+            functionName: q.functionName,
+            maxMarks: q.maxMarks,
+          });
+          score = judged.score;
+          status = judged.status;
+          evaluationBreakdown = {
+            method: 'testcase',
+            testcase: {
+              passed: judged.passed,
+              total: judged.total,
+              cases: judged.perCase.map((c) => ({
+                index: c.index,
+                passed: c.passed,
+                hidden: c.hidden,
+                input: c.hidden ? '' : c.input,
+                expectedOutput: c.hidden ? '' : c.expectedOutput,
+                actualOutput: c.actualOutput,
+              })),
+            },
+          };
+        } else if (!q) {
+          console.warn(
+            `[judge:mf] could not resolve question ${questionId} — keeping client score`,
+          );
+        }
+      } catch (e) {
+        console.error('[judge:mf] server-side judge error, keeping client score:', e?.message || e);
+      }
+    }
 
     const isTestSubmit = isTestSubmission === 'true' || isTestSubmission === true;
 
@@ -1981,10 +2121,17 @@ exports.submitMultipleFiles = async (req, res) => {
           fileCount: f.fileCount
         })),
         entryPoints: questionAnswer.entryPoints,
-        projectStructure: questionAnswer.projectStructure
+        projectStructure: questionAnswer.projectStructure,
+        // Echo the server-authored score and per-case breakdown back so the
+        // client can paint "✓ Test #1 passed / ✗ Test #2 failed" in the
+        // terminal without re-running anything. Hidden-case fields were
+        // already blanked when the breakdown was assembled.
+        score,
+        status,
+        evaluationBreakdown,
       }
     });
- 
+
   } catch (error) {
     console.error("Submit multi-files error:", error);
     res.status(500).json({

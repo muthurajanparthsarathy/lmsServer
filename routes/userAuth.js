@@ -9,6 +9,7 @@ const {
   UserVerify,
   verifyToken,
   UpdateUser,
+  UpdateMyProfile,
   DeleteUser,
   UserLogout,
   UserLogoutAll,
@@ -43,6 +44,9 @@ router.get('/getById/userAccess/:id',userAuth, getUserAccessById);
 router.get('/user/Verify', userAuth, UserVerify) // for testing only
 
 router.put('/update/users/:userId',userAuth, UpdateUser);
+// Self-service: photo + password for the CALLER only. Takes no :userId —
+// see UpdateMyProfile for why that separation matters.
+router.put('/user/me/profile', userAuth, UpdateMyProfile);
 router.delete('/delete/users/:userId',userAuth, DeleteUser)
 
 

@@ -661,7 +661,7 @@ const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  */
 async function getUserAccessPaginated(req, res, baseFilter) {
   const {
-    page, limit, search, roles, status, degree, department, year, batch,
+    page, limit, search, searchField, roles, status, degree, department, year, batch,
     sortKey, sortDir,
   } = req.query;
 
@@ -675,13 +675,44 @@ async function getUserAccessPaginated(req, res, baseFilter) {
 
   const filter = { ...baseFilter };
 
-  // Search — the same five fields the page matched on, all `contains`.
-  if (search && String(search).trim()) {
-    const rx = new RegExp(escapeRegex(String(search).trim()), 'i');
-    filter.$or = [
-      { firstName: rx }, { lastName: rx }, { email: rx },
-      { degree: rx }, { department: rx },
-    ];
+  // Search. `searchField` is the scope picker sitting next to the page's search
+  // box: absent or 'all' searches every searchable field (what the box always
+  // did), otherwise the term is matched against that ONE field so "Raj" under
+  // the Email scope cannot pull in a row that merely has Raj in its name.
+  const term = String(search || '').trim();
+  const scope = String(searchField || 'all').trim().toLowerCase();
+  if (term) {
+    const rx = new RegExp(escapeRegex(term), 'i');
+    // `role` is a ref, so the only way to match a typed role NAME is to resolve
+    // names to ids first. One indexed read over a handful of role documents —
+    // it does not scale with the user count, so it is safe on this path.
+    const needsRoleLookup = scope === 'role' || scope === 'all';
+    const roleMatchIds = needsRoleLookup
+      ? (await Role.find({ renameRole: rx }).select('_id').lean()).map((r) => r._id)
+      : [];
+    const roleClause = roleMatchIds.length ? [{ role: { $in: roleMatchIds } }] : [];
+
+    // 'user' is the USER column on the page, which renders firstName + lastName.
+    const BY_SCOPE = {
+      user: [{ firstName: rx }, { lastName: rx }],
+      email: [{ email: rx }],
+      phone: [{ phone: rx }],
+      role: roleClause,
+      all: [
+        { firstName: rx }, { lastName: rx }, { email: rx }, { phone: rx },
+        { degree: rx }, { department: rx }, ...roleClause,
+      ],
+    };
+    // hasOwnProperty, not `BY_SCOPE[scope] || …`: a scope of "constructor" or
+    // "toString" would otherwise resolve to an inherited FUNCTION and be spread
+    // into `$or` as garbage.
+    const clauses = Object.prototype.hasOwnProperty.call(BY_SCOPE, scope)
+      ? BY_SCOPE[scope]
+      : BY_SCOPE.all;
+    // A scope with no possible match (Role scope, no role name contains the
+    // term) must return nothing. An empty `$or` is a Mongo error, and dropping
+    // it would return EVERY user — the one wrong answer here.
+    filter.$or = clauses.length ? clauses : [{ _id: { $exists: false } }];
   }
   // Multi-select roles; the page compared against the user's role id.
   const roleIds = String(roles || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -1131,6 +1162,135 @@ exports.getUserAccessById = async (req, res) => {
     res
       .status(500)
       .json({ message: [{ key: "error", value: "Internal server error" }] });
+  }
+};
+
+/**
+ * Self-service profile update — photo and password ONLY.
+ *
+ * Deliberately separate from UpdateUser above rather than folded into it.
+ * UpdateUser is the admin path: it takes a :userId and writes role, status,
+ * permissions and placement. Teaching it to set passwords would hand anyone
+ * who can reach it the ability to set SOMEONE ELSE'S password without knowing
+ * it. This one ignores any id in the request and acts on req.user._id, and it
+ * writes exactly two fields.
+ *
+ * The password change verifies the current one first, so an unattended logged-in
+ * session cannot be used to lock the real owner out.
+ */
+exports.UpdateMyProfile = async (req, res) => {
+  try {
+    const userId = req.user?._id;
+    if (!userId) {
+      return res.status(401).json({
+        message: [{ key: "error", value: "User is not logged in" }],
+      });
+    }
+
+    // Only what this handler reads: the hash to compare against and the old
+    // image path to clean up.
+    const user = await User.findById(userId).select("password profile email");
+    if (!user) {
+      return res.status(404).json({
+        message: [{ key: "error", value: "User not found" }],
+      });
+    }
+
+    const { currentPassword, newPassword } = req.body;
+    const imageFile = req.files?.profile;
+
+    if (!imageFile && !newPassword) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "Nothing to update" }],
+      });
+    }
+
+    // ── Password ──
+    let hashedPassword;
+    if (newPassword) {
+      if (!currentPassword) {
+        return res.status(400).json({
+          message: [{ key: "error", value: "Current password is required" }],
+        });
+      }
+      const ok = await bcrypt.compare(String(currentPassword), user.password);
+      if (!ok) {
+        return res.status(400).json({
+          message: [{ key: "error", value: "Current password is incorrect" }],
+        });
+      }
+      if (String(newPassword).length < 8) {
+        return res.status(400).json({
+          message: [{ key: "error", value: "New password must be at least 8 characters" }],
+        });
+      }
+      if (String(newPassword) === String(currentPassword)) {
+        return res.status(400).json({
+          message: [{ key: "error", value: "New password must differ from the current one" }],
+        });
+      }
+      // The schema hashes on save(), and this writes with findByIdAndUpdate —
+      // which does NOT run that hook. Hashing here, with the same cost factor
+      // the hook uses, is what keeps a plaintext password out of the document.
+      hashedPassword = await bcrypt.hash(String(newPassword), 12);
+    }
+
+    // ── Photo ── (same upload + old-image cleanup as UpdateUser)
+    let imageUrl;
+    if (imageFile) {
+      if (user.profile && !user.profile.includes("default_profile_image")) {
+        try {
+          const oldImagePath = user.profile.split("/").pop();
+          const { error: deleteError } = await supabase.storage
+            .from("smartlms")
+            .remove([`users/profile/${oldImagePath}`]);
+          if (deleteError) console.error("Error deleting old image:", deleteError);
+        } catch (deleteErr) {
+          console.error("Error extracting old image path:", deleteErr);
+        }
+      }
+
+      const uniqueFileName = `${Date.now()}_${imageFile.name}`;
+      const { error } = await supabase.storage
+        .from("smartlms")
+        .upload(`users/profile/${uniqueFileName}`, imageFile.data);
+
+      if (error) {
+        console.error("Error uploading image to Supabase:", error);
+        return res.status(500).json({
+          message: [{ key: "error", value: "Error uploading image to Supabase" }],
+        });
+      }
+      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/users/profile/${uniqueFileName}`;
+    }
+
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      {
+        ...(hashedPassword && { password: hashedPassword }),
+        ...(imageUrl && { profile: imageUrl }),
+        updatedBy: req.user.email,
+        updatedAt: new Date(),
+      },
+      { new: true, runValidators: true }
+    ).select("_id email firstName lastName phone gender profile updatedAt");
+
+    return res.status(200).json({
+      message: [{
+        key: "success",
+        value: hashedPassword && imageUrl
+          ? "Photo and password updated"
+          : hashedPassword
+            ? "Password updated"
+            : "Profile photo updated",
+      }],
+      user: updatedUser,
+    });
+  } catch (error) {
+    console.error("Error updating own profile:", error);
+    return res.status(500).json({
+      message: [{ key: "error", value: "Error updating profile" }],
+    });
   }
 };
 

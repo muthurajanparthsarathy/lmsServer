@@ -244,6 +244,9 @@ app.use("/", glossaryRoutes);
 // CodeChef, HackerRank, AtCoder) for the Coding Analytics dashboard.
 app.use("/", require("./routes/codingAnalyticsRoutes"));
 
+// ─── Piston proxy (auth-gated; replaces the direct browser→Piston path) ──────
+app.use("/api", require("./routes/executionRoutes"));
+
 // ─── Super Admin module (independent, namespaced under /superadmin) ──────────
 app.use(require("./routes/superadmin"));
 

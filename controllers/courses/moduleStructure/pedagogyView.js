@@ -8,6 +8,10 @@ const CourseStructure = mongoose.model('Course-Structure');
 const LevelView = require('../../../models/Courses/moduleStructure/levelModel');
 const User = require("../../../models/UserModel");
 const Role = require('../../../models/RoleModel');
+// Blank input/expectedOutput on hidden test cases before a student read
+// response leaves this server. Author-like roles still see the real fields.
+// See server/services/testCaseVisibility.js for the walker + role gate.
+const { stripHiddenForStudent, stripHiddenForStudentDeep } = require('../../../services/testCaseVisibility');
 
 
 const { createClient } = require("@supabase/supabase-js");
@@ -858,6 +862,10 @@ exports.getAllCoursesData = async (req, res) => {
     structuredCourse.resourceBatchContext =
       buildResourceBatchContext(course, req.user, requestedBatch);
 
+    // Blank hidden testCases before returning the full course tree.
+    // Author-like roles see the real inputs; students get blanks.
+    stripHiddenForStudentDeep(structuredCourse, req.user);
+
     res.status(200).json({
       success: true,
       data: structuredCourse
@@ -1362,6 +1370,12 @@ exports.getNodePedagogy = async (req, res) => {
       gateSection(node.pedagogy.You_Do);
     }
 
+    // Blank hidden test cases before shipping to the browser. Author-like
+    // roles keep them; students / unauth get input+expectedOutput cleared
+    // while the row (index + isHidden flag) stays so the UI can still say
+    // "Hidden test #3 failed" without leaking what the input was.
+    stripHiddenForStudent(node, req.user);
+
     return res.status(200).json({
       success: true,
       data: node,
@@ -1751,6 +1765,9 @@ exports.getAllCoursesDataWithoutAINotes = async (req, res) => {
       modules: modulesData,
 
     };
+
+    // Blank hidden test cases before the response leaves the server.
+    stripHiddenForStudentDeep(responseData, req.user);
 
     res.status(200).json({
       success: true,
