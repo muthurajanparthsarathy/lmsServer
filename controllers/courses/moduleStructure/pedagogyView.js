@@ -2100,6 +2100,10 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
       coursesByService[service] = (coursesByService[service] || 0) + 1;
     });
 
+    // Blank hidden test cases + Solution Code before the response leaves the
+    // server (light mode ships no `modules`, so this is a no-op there).
+    stripHiddenForStudentDeep(coursesWithData, req.user);
+
     res.status(200).json({
       success: true,
       data: {

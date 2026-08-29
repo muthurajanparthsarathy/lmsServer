@@ -126,7 +126,13 @@ async function detachUsersFromMapping(mappingId) {
     { serviceMappingId: mappingId },
     { $unset: { serviceMappingId: "", serviceModel: "", phase: "" } }
   );
-  return res.modifiedCount || 0;
+  // Multi-service users can also carry this mapping in their services[] array
+  // (Reassign Users / bulk-add-service) — pull those entries too.
+  const resArr = await M("LMS-User").updateMany(
+    { "services.serviceMappingId": mappingId },
+    { $pull: { services: { serviceMappingId: mappingId } } }
+  );
+  return (res.modifiedCount || 0) + (resArr.modifiedCount || 0);
 }
 
 // Best-effort Supabase image cleanup, mirroring deleteCourseStructure's own

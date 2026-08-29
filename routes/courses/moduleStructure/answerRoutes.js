@@ -10,6 +10,15 @@ const {
   rerunSubmissions,
   getRerunContext,
 } = require("../../../controllers/courses/moduleStructure/answer");
+const {
+  startAttempt,
+  getAttemptState,
+  setCurrentQuestion,
+  finaliseAttempt,
+  requestResume,
+  approveResume,
+  rejectResume,
+} = require("../../../controllers/courses/moduleStructure/attemptController");
 const { userAuth } = require("../../../middlewares/userAuth");
 
 const {
@@ -17,6 +26,17 @@ const {
 } = require("../../../controllers/courses/moduleStructure/answer");
 
 router.post("/courses/answers/submit", userAuth, submitAnswer);
+
+// ── Assessment Recovery & Resume ──────────────────────────────────────────
+// Idempotent attempt lifecycle. See attemptController.js for the contract.
+router.post("/courses/attempt/start", userAuth, startAttempt);
+router.get("/courses/attempt/state", userAuth, getAttemptState);
+router.patch("/courses/attempt/current-question", userAuth, setCurrentQuestion);
+router.post("/courses/attempt/submit", userAuth, finaliseAttempt);
+// Permission gate — student requests, trainer approves/rejects
+router.post("/courses/attempt/request-resume", userAuth, requestResume);
+router.post("/courses/attempt/approve-resume", userAuth, approveResume);
+router.post("/courses/attempt/reject-resume", userAuth, rejectResume);
 
 router.get("/users/answer/:courseId", userAuth, getAllUsers);
 

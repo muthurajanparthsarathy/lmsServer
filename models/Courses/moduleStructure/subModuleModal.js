@@ -392,6 +392,12 @@ const questionSchema = new mongoose.Schema(
     // the question; students get it in an iframe instead of the compiler.
     isLinkQuestion: { type: Boolean, default: false },
     questionLink: { type: String, default: '' },
+    // Code Setup — Starter shown to students on attempt start; Solution is
+    // author-only (stripped for students by testCaseVisibility.js). A code
+    // string for Programming/SQL, or { html, css, javascript } for Frontend.
+    starterCode: { type: mongoose.Schema.Types.Mixed, default: '' },
+    solutionCode: { type: mongoose.Schema.Types.Mixed, default: '' },
+    codeSetupLanguage: { type: String, default: '' },
 
     // ── Database Fields ───────────────────────────────────────────────────────
     sampleQuery: { type: String, default: '' },

@@ -301,6 +301,12 @@ exports.getLiveDashboard = async (req, res) => {
           lastActivity: fmtActivity(session.lastActivityAt),
           submitted: !!session.submittedAt,
           durationSeconds: computeDurationSeconds({ session, activityDuration: durationByStudent.get(id) }),
+          // Recovery & Resume — carry lifecycle fields on the initial fetch
+          // so the dashboard row renders the correct pill immediately
+          // (before any socket update lands).
+          isOnline: !!session.isOnline,
+          attemptStatus: session.status || (session.submittedAt ? 'submitted' : 'active'),
+          terminationReason: session.terminationReason || null,
         };
       }
 

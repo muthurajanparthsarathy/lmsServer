@@ -181,6 +181,13 @@ const questionsSchema = new mongoose.Schema({
   // Model/answer code ("Output Code" in the Create Question modal) — optional,
   // separate from solutions.startedCode which holds the starter scaffold.
   outputCode: { type: String, default: '' },
+  // Code Setup — Starter is shown to students on attempt start; Solution is
+  // author-only, used for validation, and stripped from every student-facing
+  // pedagogy response. Programming/SQL store a code string; Frontend stores
+  // { html, css, javascript }. Must be declared or strict mode drops them.
+  starterCode: { type: mongoose.Schema.Types.Mixed, default: '' },
+  solutionCode: { type: mongoose.Schema.Types.Mixed, default: '' },
+  codeSetupLanguage: { type: String, default: '' },
   timeLimit: { type: Number, min: 0, max: 10000 },
   memoryLimit: { type: Number, min: 0, max: 1024 },
   

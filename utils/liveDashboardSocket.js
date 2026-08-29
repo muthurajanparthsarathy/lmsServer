@@ -6,6 +6,17 @@
 const ExamSession = require("../models/Courses/moduleStructure/ExamSessionModel");
 const StudentQuestionActivity = require("../models/Courses/moduleStructure/StudentQuestionActivityModel");
 const User = require("../models/UserModel");
+// Arm the resume-permission gate the moment a student's grace-flip fires.
+// Imported lazily to avoid a require-cycle on server boot.
+let _attemptGate = null;
+function armGate(assessmentId, studentId) {
+  try {
+    if (!_attemptGate) _attemptGate = require("../controllers/courses/moduleStructure/attemptController");
+    if (_attemptGate && typeof _attemptGate.armResumeGateOnDisconnect === "function") {
+      return _attemptGate.armResumeGateOnDisconnect(assessmentId, studentId);
+    }
+  } catch (e) { /* ignore */ }
+}
 
 const room = (assessmentId) => `assessment_${assessmentId}_teachers`;
 
@@ -50,8 +61,15 @@ async function scheduleOfflineFlip(io, assessmentId, studentId) {
     if (session && !session.isOnline && !session.submittedAt) {
       session.inProgress = false;
       await session.save();
+      // Arm the resume-permission gate — student cannot re-enter without
+      // trainer approval. Fire-and-forget; the arming broadcast is done
+      // inside the controller so the dashboard sees it immediately.
+      armGate(assessmentId, studentId);
       io.to(room(assessmentId)).emit("dashboard:student_update", {
-        studentId, inProgress: false, lastActivity: fmtActivity(session.lastActivityAt),
+        studentId, inProgress: false, isOnline: false,
+        attemptStatus: session.status || 'active',
+        terminationReason: session.terminationReason || null,
+        lastActivity: fmtActivity(session.lastActivityAt),
       });
     }
   }, 30000);
@@ -90,11 +108,87 @@ async function recomputeAndBroadcast(io, assessmentId, studentId, extra = {}) {
     completionPercent: total ? Math.round((completed / total) * 100) : 0,
     inProgress: session.inProgress,
     lastActivity: fmtActivity(session.lastActivityAt),
+    // Recovery & Resume — carry the lifecycle fields on every broadcast so
+    // the dashboard row can render the new Disconnected / Terminated pills
+    // without a separate round-trip.
+    isOnline: session.isOnline,
+    attemptStatus: session.status || 'active',
+    terminationReason: session.terminationReason || null,
     ...extra,
   });
 }
 
+// ─── Server-authoritative timer sweep (Recovery & Resume) ─────────────────
+// A safety net that catches attempts whose timer expired while the student's
+// browser was closed (so no submitAnswer landed to trip the lazy check in
+// answer.js:enforceAttemptExpiry). Runs every 30 s per server process; the
+// query is index-supported by `(status, serverExpiresAt)` on ExamSession.
+// Guarded by a module-level flag so multiple socket connections don't stack
+// intervals.
+let expirySweepStarted = false;
+function startExpirySweep(io) {
+  if (expirySweepStarted) return;
+  expirySweepStarted = true;
+  const SWEEP_MS = 30 * 1000;
+  const sweep = async () => {
+    try {
+      const now = new Date();
+      // Elapsed-time expiry (freeze at last submit). A session expires when:
+      //   elapsedSec = max(0, (lastSubmittedAt || startedAt) - startedAt) / 1000
+      //   elapsedSec >= totalDurationSeconds
+      // Rows without totalDurationSeconds fall back to the legacy wall-clock
+      // check on `serverExpiresAt` so pre-existing rows still get swept.
+      const candidates = await ExamSession.find({
+        status: "active",
+        $or: [
+          { totalDurationSeconds: { $gt: 0 } },
+          { serverExpiresAt: { $ne: null } },
+        ],
+      });
+      for (const s of candidates) {
+        let expired = false;
+        const total = Number(s.totalDurationSeconds);
+        if (Number.isFinite(total) && total > 0 && s.startedAt) {
+          const anchor = s.lastSubmittedAt || s.startedAt;
+          const elapsedSec = Math.max(0, Math.floor((new Date(anchor).getTime() - new Date(s.startedAt).getTime()) / 1000));
+          expired = elapsedSec >= total;
+        } else if (s.serverExpiresAt && s.serverExpiresAt.getTime() <= now.getTime()) {
+          expired = true;
+        }
+        if (!expired) continue;
+        s.status = "terminated";
+        s.terminationReason = "timer";
+        s.submittedAt = now;
+        s.inProgress = false;
+        s.isOnline = false;
+        await s.save();
+        io.to(room(s.assessmentId)).emit("dashboard:student_update", {
+          studentId: s.studentId,
+          inProgress: false,
+          isOnline: false,
+          submitted: true,
+          attemptStatus: 'terminated',
+          terminationReason: 'timer',
+          lastActivity: fmtActivity(s.lastActivityAt),
+        });
+      }
+    } catch (e) {
+      // Never let a sweep failure kill the interval — log and continue.
+      console.error("[attempt.sweep] error:", e && e.message ? e.message : e);
+    }
+  };
+  // Fire once on boot then every SWEEP_MS after. The initial call catches any
+  // rows that expired while the server was down.
+  setImmediate(sweep);
+  setInterval(sweep, SWEEP_MS);
+}
+
 function registerLiveDashboardHandlers(io, socket) {
+  // Kick off the expiry sweep on the first socket registration — this is the
+  // first place we have a reference to `io`. Guarded by expirySweepStarted so
+  // subsequent connections don't stack intervals.
+  startExpirySweep(io);
+
   // ── Teacher rooms ──────────────────────────────────────────────────────────
   socket.on("teacher:join_dashboard", ({ assessmentId }) => {
     if (!assessmentId) return;
@@ -104,6 +198,18 @@ function registerLiveDashboardHandlers(io, socket) {
   socket.on("teacher:leave_dashboard", ({ assessmentId }) => {
     if (!assessmentId) return;
     socket.leave(room(assessmentId));
+  });
+
+  // ── Student's private attempt room (Recovery & Resume permission gate) ─
+  // Students join here so the server can push `attempt:resume_state` events
+  // (trainer approved/rejected). The room name embeds the studentId so
+  // approvals only reach the intended student.
+  socket.on("student:join_attempt_room", ({ exerciseId }) => {
+    try {
+      const studentId = socket.userId ? String(socket.userId) : null;
+      if (!exerciseId || !studentId) return;
+      socket.join(`assessment_${exerciseId}_student_${studentId}`);
+    } catch { /* ignore */ }
   });
 
   // ── Student joined ───────────────────────────────────────────────────────────
@@ -287,7 +393,10 @@ function registerLiveDashboardHandlers(io, socket) {
       await session.save();
 
       io.to(room(assessmentId)).emit("dashboard:student_update", {
-        studentId, inProgress: session.inProgress, lastActivity: fmtActivity(session.lastActivityAt),
+        studentId, inProgress: session.inProgress, isOnline: true,
+        attemptStatus: session.status || 'active',
+        terminationReason: session.terminationReason || null,
+        lastActivity: fmtActivity(session.lastActivityAt),
       });
     } catch (e) {
       console.error("student:reconnected error:", e.message);

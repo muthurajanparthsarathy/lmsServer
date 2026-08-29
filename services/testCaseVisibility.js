@@ -45,9 +45,17 @@ function isStudentLike(user) {
 }
 
 // Mutate a single question object in place — blank the sensitive fields of
-// any test case marked isHidden. Idempotent.
+// any test case marked isHidden, plus the Code Setup solution (always, not
+// just when hidden — Solution Code is author-only reference material and
+// must never reach a student response). Idempotent. Only called from the
+// student-strip paths below, so the caller has already confirmed the reader
+// is student-like — no role check needed here.
 function stripHiddenOnQuestion(q) {
-  if (!q || !Array.isArray(q.testCases)) return;
+  if (!q) return;
+  if (q.solutionCode !== undefined) {
+    q.solutionCode = typeof q.solutionCode === 'string' ? '' : { html: '', css: '', javascript: '' };
+  }
+  if (!Array.isArray(q.testCases)) return;
   for (let i = 0; i < q.testCases.length; i++) {
     const tc = q.testCases[i];
     if (tc && tc.isHidden) {

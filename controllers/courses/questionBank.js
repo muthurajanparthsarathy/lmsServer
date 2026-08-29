@@ -522,6 +522,11 @@ exports.createQuestionBank = async (req, res) => {
           hints: hints,
           testCases: testCases,
           solutions: solutions,
+          // Code Setup — Starter shown to students; Solution is author-only.
+          // Programming/SQL: a code string. Frontend: { html, css, javascript }.
+          starterCode: question.starterCode ?? '',
+          solutionCode: question.solutionCode ?? '',
+          codeSetupLanguage: question.codeSetupLanguage || '',
           timeLimit: question.timeLimit || 2000,
           memoryLimit: question.memoryLimit || 256,
           isActive: question.isActive !== undefined ? question.isActive : true,
@@ -1578,6 +1583,10 @@ exports.updateQuestionBank = async (req, res) => {
           functionName: (question.solutions || existingQuestion.solutions)?.functionName || '',
           language: (question.solutions || existingQuestion.solutions)?.language || 'javascript'
         } : null,
+        // Code Setup — Starter shown to students; Solution is author-only.
+        starterCode: question.starterCode !== undefined ? question.starterCode : (existingQuestion.starterCode ?? ''),
+        solutionCode: question.solutionCode !== undefined ? question.solutionCode : (existingQuestion.solutionCode ?? ''),
+        codeSetupLanguage: question.codeSetupLanguage !== undefined ? question.codeSetupLanguage : (existingQuestion.codeSetupLanguage || ''),
         timeLimit: question.timeLimit || existingQuestion.timeLimit || 2000,
         memoryLimit: question.memoryLimit || existingQuestion.memoryLimit || 256,
         isActive: question.isActive !== undefined ? question.isActive : existingQuestion.isActive,

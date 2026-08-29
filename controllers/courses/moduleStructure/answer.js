@@ -1,6 +1,9 @@
 const User = require('../../../models/UserModel');
 const mongoose = require('mongoose');
 const ActivityLog = require('../../../models/ActivityLog');
+// Server-authoritative timer for assessment attempts. Loaded lazily inside
+// `enforceAttemptExpiry` so unit tests / imports don't require it eagerly.
+const ExamSession = require('../../../models/Courses/moduleStructure/ExamSessionModel');
 // Resources by Batch — the two lookups below resolve an exercise from its own
 // `_id` in order to name it / check its deadline. That id is unique, so the
 // owning batch does not change the answer; what matters is that a batch-wise
@@ -89,6 +92,81 @@ async function trackAssignmentDuration({ user, courseId, exerciseId, exerciseNam
       await ActivityLog.create(doc);
     }
   } catch (e) { /* best effort — never block submission */ }
+}
+
+// ── Assessment expiry guard (Recovery & Resume, You_Do only) ──────────────
+// ELAPSED-TIME model (freeze at last submit). A write is rejected when:
+//   remaining = totalDurationSeconds - max(0, (lastSubmittedAt || now) - startedAt)
+// has run out. Time WHILE the student was away doesn't count — matching the
+// product spec ("remaining = 30min − (lastSubmittedAt − startedAt)").
+//
+// If the attempt is still `active` we flip it to `terminated`/`timer` on the
+// same request so the dashboard sees the terminal state immediately.
+//
+// Also stamps `lastSubmittedAt` when the write is allowed — the frozen-clock
+// anchor moves forward on every real submission.
+async function enforceAttemptExpiry({ userId, exerciseId, category, isTestSubmit }) {
+  if (category !== 'You_Do' || !userId || !exerciseId) return null;
+  try {
+    const session = await ExamSession.findOne({
+      assessmentId: String(exerciseId),
+      studentId: String(userId),
+    });
+    if (!session) return null; // no attempt started — legacy call, allow
+    if (session.status === 'submitted' || session.status === 'terminated') {
+      return {
+        status: 410,
+        body: {
+          success: false,
+          message: [{ key: 'attempt_terminal', value: 'This assessment attempt is already complete.' }],
+          attemptStatus: session.status,
+          terminationReason: session.terminationReason,
+        },
+      };
+    }
+    // Elapsed-time expiry check. `serverExpiresAt` is legacy; only fall back
+    // to it when the row was created before this feature (no
+    // `totalDurationSeconds`).
+    const total = Number(session.totalDurationSeconds);
+    let expired = false;
+    if (Number.isFinite(total) && total > 0 && session.startedAt) {
+      const anchor = session.lastSubmittedAt || session.startedAt;
+      const elapsedSec = Math.max(0, Math.floor((new Date(anchor).getTime() - new Date(session.startedAt).getTime()) / 1000));
+      expired = elapsedSec >= total;
+    } else if (session.serverExpiresAt && session.serverExpiresAt.getTime() < Date.now()) {
+      expired = true;
+    }
+    if (expired) {
+      session.status = 'terminated';
+      session.terminationReason = 'timer';
+      session.submittedAt = new Date();
+      session.inProgress = false;
+      await session.save();
+      return {
+        status: 410,
+        body: {
+          success: false,
+          message: [{ key: 'attempt_expired', value: 'Time is up. This attempt has been auto-submitted.' }],
+          attemptStatus: 'terminated',
+          terminationReason: 'timer',
+        },
+      };
+    }
+    // Write is allowed — stamp `lastSubmittedAt` so the frozen clock moves.
+    // Done here so the timer-anchor is coherent with every real save.
+    session.lastSubmittedAt = new Date();
+    session.lastActivityAt = session.lastSubmittedAt;
+    // If the write is a full test submission the finaliseAttempt endpoint
+    // will also flip status → 'submitted' when the client calls it; the
+    // stamp here is safe either way (submittedAt gets set there too).
+    await session.save();
+    return null;
+  } catch (err) {
+    // Never block a legitimate submit on a monitoring-layer error — log and
+    // fall through to the existing answer write path.
+    console.error('[enforceAttemptExpiry] error:', err);
+    return null;
+  }
 }
 
 const Module1 = mongoose.model('Module1');
@@ -306,6 +384,12 @@ exports.submitAnswer = async (req, res) => {
         message: "Category must be one of: I_Do, We_Do, You_Do"
       });
     }
+
+    // Server-authoritative timer check for You_Do assessments — rejects
+    // writes past `serverExpiresAt` and finalises the attempt as
+    // `terminated`/`timer` on the same request. See enforceAttemptExpiry().
+    const expiry = await enforceAttemptExpiry({ userId, exerciseId, category });
+    if (expiry) return res.status(expiry.status).json(expiry.body);
 
     const user = await User.findById(userId);
     if (!user) {
@@ -1790,6 +1874,10 @@ exports.submitMultipleFiles = async (req, res) => {
         message: "Category must be one of: I_Do, We_Do, You_Do"
       });
     }
+
+    // Server-authoritative timer check — same as submitAnswer.
+    const expiry = await enforceAttemptExpiry({ userId, exerciseId, category });
+    if (expiry) return res.status(expiry.status).json(expiry.body);
 
     // Validate files array
     if (!files || !Array.isArray(files) || files.length === 0) {

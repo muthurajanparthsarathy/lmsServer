@@ -1639,6 +1639,112 @@ exports.toggleUserStatus = async (req, res) => {
   }
 };
 
+// ─── Bulk-add a service to many users (Reassign Users flow) ──────────────────
+// ADDITIVE by design: the user keeps every service they already have (the
+// legacy single serviceModel/serviceMappingId fields AND the services[] array)
+// and gains one more entry in services[]. Nothing is overwritten or cleared.
+//
+// Auto-enrolment runs per user, scoped to the NEW service only, through a shim
+// object: the real doc's identity/hierarchy fields plus the new service's
+// client/mapping. autoEnrollUser is add-only and idempotent, so existing
+// enrolments are never touched, and course links land on the real doc through
+// the shared courses[] reference.
+exports.bulkAddServiceToUsers = async (req, res) => {
+  try {
+    const { userIds, service } = req.body;
+
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "User IDs array is required" }],
+      });
+    }
+    if (!service || !service.serviceMappingId || !service.clientId) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "service.serviceMappingId and service.clientId are required" }],
+      });
+    }
+
+    const actorId = req.user?.id || req.user?._id;
+    const results = [];
+
+    for (const userId of userIds) {
+      try {
+        const doc = await User.findById(userId);
+        if (!doc) {
+          results.push({ userId, status: "error", reason: "User not found" });
+          continue;
+        }
+
+        const targetMapping = String(service.serviceMappingId);
+        const alreadyLegacy =
+          doc.serviceMappingId && String(doc.serviceMappingId) === targetMapping;
+        const alreadyInArray = (doc.services || []).some(
+          (s) => s.serviceMappingId && String(s.serviceMappingId) === targetMapping
+        );
+        if (alreadyLegacy || alreadyInArray) {
+          results.push({ userId, status: "already_mapped", email: doc.email });
+          continue;
+        }
+
+        doc.services = doc.services || [];
+        doc.services.push({
+          serviceMappingId: service.serviceMappingId,
+          serviceModel: service.serviceModel || "",
+          clientId: service.clientId,
+          clientName: service.clientName || "",
+        });
+        doc.updatedAt = new Date();
+        await doc.save();
+
+        // Enrol into the new service's courses. The shim scopes autoEnrollUser
+        // to the added service; `courses` is the doc's own array so link pushes
+        // are persisted by the shim's save().
+        try {
+          const shim = {
+            _id: doc._id,
+            role: doc.role,
+            degree: doc.degree,
+            department: doc.department,
+            section: doc.section,
+            phase: "",
+            clientId: service.clientId,
+            serviceModel: service.serviceModel || "",
+            serviceMappingId: service.serviceMappingId,
+            courses: doc.courses,
+            save: () => doc.save(),
+          };
+          const enrolment = await autoEnrollUser(shim, req.user.institution, actorId);
+          if (enrolment.error) {
+            console.error(`bulk-add-service auto-enrol error for ${doc.email}:`, enrolment.error);
+          }
+          results.push({
+            userId,
+            status: "added",
+            email: doc.email,
+            enrolled: enrolment.enrolled?.length || 0,
+          });
+        } catch (enrolErr) {
+          console.error(`bulk-add-service auto-enrol threw for ${doc.email}:`, enrolErr.message);
+          // Service was added even if enrolment failed — report as added.
+          results.push({ userId, status: "added", email: doc.email, enrolled: 0 });
+        }
+      } catch (err) {
+        results.push({ userId, status: "error", reason: err.message });
+      }
+    }
+
+    return res.status(200).json({
+      message: [{ key: "success", value: "Bulk add service completed" }],
+      results,
+    });
+  } catch (error) {
+    console.error("bulkAddServiceToUsers error:", error);
+    return res.status(500).json({
+      message: [{ key: "error", value: "Internal server error" }],
+    });
+  }
+};
+
 exports.bulkToggleUserStatus = async (req, res) => {
   try {
     const { userIds, status } = req.body;

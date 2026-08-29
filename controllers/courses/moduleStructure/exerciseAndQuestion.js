@@ -40,6 +40,24 @@ const {
   COURSE_BATCH_FIELDS,
 } = require("../../../utils/pedagogyScope");
 const { scopeNodePedagogy, resolveViewerBatchId } = require("../../../utils/batchResources");
+const { stripHiddenOnQuestion } = require("../../../services/testCaseVisibility");
+
+// Code Setup (Starter/Solution) — Programming and Database questions store a
+// single code string; Frontend stores { html, css, javascript }. Accept
+// either shape from the client, sanitize sub-fields to strings, and return
+// undefined for anything else so the "remove undefined fields" pass below
+// drops it rather than persisting garbage.
+function normalizeCodeSetupValue(v) {
+  if (typeof v === 'string') return v;
+  if (v && typeof v === 'object') {
+    return {
+      html: typeof v.html === 'string' ? v.html : '',
+      css: typeof v.css === 'string' ? v.css : '',
+      javascript: typeof v.javascript === 'string' ? v.javascript : '',
+    };
+  }
+  return undefined;
+}
 
 // ─── Approval-workflow gate helpers ─────────────────────────────────────────
 // Two-part rule (mirrors the client's `isAssessmentComplete`):
@@ -637,7 +655,8 @@ exports.getExerciseById = async (req, res) => {
     // ── Approval gating ─────────────────────────────────────────────────
     // Students may only fetch exercises whose approval chain has finished —
     // this payload ships questions with correct answers and test cases.
-    if (!isExerciseStudentVisible(foundExercise) && (await isStudentRequester(req.user))) {
+    const requesterIsStudent = await isStudentRequester(req.user);
+    if (!isExerciseStudentVisible(foundExercise) && requesterIsStudent) {
       return res.status(403).json({
         message: [{ key: "error", value: "This exercise is awaiting approval and is not yet available." }]
       });
@@ -652,6 +671,14 @@ exports.getExerciseById = async (req, res) => {
       entity: foundEntity,
       location: foundLocation
     };
+
+    // This is the endpoint the student attempt UI calls to load the exercise
+    // + its questions into the code editor — blank hidden test cases and
+    // Code Setup's Solution Code before they leave the server. Trainers/staff
+    // (requesterIsStudent === false) still get the full authoring view.
+    if (requesterIsStudent && Array.isArray(completeExerciseData.questions)) {
+      completeExerciseData.questions.forEach(stripHiddenOnQuestion);
+    }
 
     // Remove any Mongoose-specific properties if they exist
     if (completeExerciseData.__v !== undefined) {
@@ -2169,6 +2196,61 @@ exports.updateExercise = async (req, res) => {
     });
   }
 };
+// ── Derived Assignment-list status ───────────────────────────────────────────
+// Mirror of the client's isExerciseComplete + getExerciseStatus in
+// ProblemSolving.tsx — keep the two in LOCKSTEP. Used only by getExercises'
+// paginated mode so the list's "Incomplete / Completed" status filter can run
+// server-side over the whole list, not just the visible page.
+const psIsExerciseComplete = (ex) => {
+  if (!ex.exerciseType) return false;
+  if (!(ex.exerciseInformation?.exerciseName || '').trim()) return false;
+  if (!ex.availabilityPeriod?.startDate) return false;
+
+  if (ex.isGraded !== false) {
+    if (ex.exerciseType === 'Combined') {
+      if ((ex.exerciseInformation?.totalMarksMCQ ?? 0) <= 0) return false;
+      if ((ex.exerciseInformation?.totalMarksProgramming ?? 0) <= 0) return false;
+    } else {
+      if ((ex.exerciseInformation?.totalMarks ?? 0) <= 0) return false;
+    }
+  }
+
+  const saved = Array.isArray(ex.stepsSaved) ? ex.stepsSaved : [];
+  const requiredSteps = ['Exercise Details', 'Question Configuration', 'Schedule', 'Notifications'];
+  if (ex.isGraded !== false) requiredSteps.push('Grade Settings');
+  return requiredSteps.every((step) => saved.includes(step));
+};
+
+const psExerciseStatus = (ex) => {
+  if (!psIsExerciseComplete(ex)) return 'Incomplete';
+  const questions = ex.questions ?? [];
+  const mcqCfg = ex.questionConfiguration?.mcqQuestionConfiguration ?? null;
+  const progCfg = ex.questionConfiguration?.programmingQuestionConfiguration ?? null;
+  const mcqCount = questions.filter((q) => q.questionType === 'mcq').length;
+  const progCount = questions.filter(
+    (q) => q.questionType === 'programming' || q.questionType === 'database' || q.questionType === 'others'
+  ).length;
+  let maxQ = 0, curQ = 0;
+  const progMaxOf = () => {
+    const counts = progCfg?.levelBasedCounts ?? progCfg?.selectionLevelCounts ?? {};
+    return progCfg?.questionConfigType === 'general'
+      ? (progCfg?.generalQuestionCount ?? 0)
+      : ((counts.easy ?? 0) + (counts.medium ?? 0) + (counts.hard ?? 0));
+  };
+  if (ex.exerciseType === 'MCQ') {
+    maxQ = mcqCfg?.totalMcqQuestions ?? 0;
+    curQ = mcqCount;
+  } else if (ex.exerciseType === 'Programming') {
+    maxQ = progMaxOf();
+    curQ = progCount;
+  } else if (ex.exerciseType === 'Combined') {
+    maxQ = (mcqCfg?.totalMcqQuestions ?? 0) + progMaxOf();
+    curQ = mcqCount + progCount;
+  }
+  if (maxQ > 0 && curQ < maxQ) return 'Incomplete';
+  return 'Completed';
+};
+
 exports.getExercises = async (req, res) => {
   try {
     const { type, id } = req.params;
@@ -2234,6 +2316,45 @@ exports.getExercises = async (req, res) => {
         }
       });
       exercises = allExercises;
+    }
+
+    // ── Question-Bank-style optional pagination ──────────────────────────
+    // Passing `page` switches this endpoint into paginated mode: the list's
+    // filters (search / exerciseType / derived status) + newest-first sort
+    // run over the WHOLE list here, and one slice goes back with the pager
+    // totals. Without `page` the response below is the original full array,
+    // unchanged — every existing caller keeps working.
+    const { page, limit, search, exerciseType, status } = req.query;
+    if (page !== undefined) {
+      let rows = [...exercises];
+      rows.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      if (exerciseType) rows = rows.filter((ex) => ex.exerciseType === exerciseType);
+      if (status) rows = rows.filter((ex) => psExerciseStatus(ex) === status);
+      if (search) {
+        const q = String(search).toLowerCase();
+        rows = rows.filter((ex) =>
+          (ex.exerciseInformation?.exerciseName || '').toLowerCase().includes(q) ||
+          (ex.exerciseInformation?.exerciseId || '').toLowerCase().includes(q)
+        );
+      }
+      const itemsPerPage = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
+      const totalItems = rows.length;
+      const totalPages = Math.max(1, Math.ceil(totalItems / itemsPerPage));
+      const currentPage = Math.min(Math.max(parseInt(page, 10) || 1, 1), totalPages);
+      const slice = rows.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
+
+      return res.json({
+        message: [{ key: "success", value: "Exercises retrieved successfully" }],
+        data: {
+          exercises: slice,
+          section: section,
+          subcategory: subcategory,
+          total: totalItems,
+          pagination: { currentPage, totalPages, totalItems, itemsPerPage },
+          entityType: type,
+          entityId: id
+        }
+      });
     }
 
     return res.json({
@@ -3342,6 +3463,21 @@ exports.addQuestion = async (req, res) => {
               && /^https?:\/\/\S+$/i.test(questionData.questionLink.trim()))
             ? questionData.questionLink.trim()
             : undefined,
+          // Code Setup — starterCode ships to the student attempt UI;
+          // solutionCode is author-only (stripped for students by
+          // testCaseVisibility.js on every pedagogy read). Link questions
+          // carry neither.
+          starterCode: questionData.isLinkQuestion === true
+            ? undefined
+            : normalizeCodeSetupValue(questionData.starterCode),
+          solutionCode: questionData.isLinkQuestion === true
+            ? undefined
+            : normalizeCodeSetupValue(questionData.solutionCode),
+          codeSetupLanguage: (questionData.isLinkQuestion !== true
+              && typeof questionData.codeSetupLanguage === 'string'
+              && questionData.codeSetupLanguage)
+            ? questionData.codeSetupLanguage
+            : undefined,
         });
 
         // Remove undefined fields
@@ -3387,6 +3523,11 @@ exports.addQuestion = async (req, res) => {
               sequence: hint.sequence || index,
             }))
             : undefined,
+          // Code Setup — starterCode ships to the student attempt UI;
+          // solutionCode is author-only (stripped for students by
+          // testCaseVisibility.js on every pedagogy read).
+          starterCode: typeof questionData.starterCode === 'string' ? questionData.starterCode : undefined,
+          solutionCode: typeof questionData.solutionCode === 'string' ? questionData.solutionCode : undefined,
         });
       } else if (qType === 'others') {
         // Build othersDescription object with text, html, images, and attachments
@@ -4139,6 +4280,26 @@ if (updateData.source) {
         const link = typeof updateData.questionLink === 'string' ? updateData.questionLink.trim() : '';
         updatedQuestion.questionLink = /^https?:\/\/\S+$/i.test(link) ? link : '';
       }
+
+      // Code Setup — starterCode ships to the student attempt UI; solutionCode
+      // is author-only (stripped for students by testCaseVisibility.js on
+      // every pedagogy read). Switching a question to link mode clears both.
+      if (updatedQuestion.isLinkQuestion === true) {
+        updatedQuestion.starterCode = undefined;
+        updatedQuestion.solutionCode = undefined;
+      } else {
+        if (updateData.starterCode !== undefined) {
+          updatedQuestion.starterCode = normalizeCodeSetupValue(updateData.starterCode);
+        }
+        if (updateData.solutionCode !== undefined) {
+          updatedQuestion.solutionCode = normalizeCodeSetupValue(updateData.solutionCode);
+        }
+      }
+      if (updateData.codeSetupLanguage !== undefined) {
+        updatedQuestion.codeSetupLanguage = (typeof updateData.codeSetupLanguage === 'string' && updateData.codeSetupLanguage)
+          ? updateData.codeSetupLanguage
+          : undefined;
+      }
     } else if (finalQuestionType === 'database') {
       // Update Database fields
       if (updateData.title !== undefined) {
@@ -4195,6 +4356,16 @@ if (updateData.source) {
         } else {
           updatedQuestion.hints = [];
         }
+      }
+
+      // Code Setup — starterCode ships to the student attempt UI; solutionCode
+      // is author-only (stripped for students by testCaseVisibility.js on
+      // every pedagogy read).
+      if (updateData.starterCode !== undefined) {
+        updatedQuestion.starterCode = typeof updateData.starterCode === 'string' ? updateData.starterCode : '';
+      }
+      if (updateData.solutionCode !== undefined) {
+        updatedQuestion.solutionCode = typeof updateData.solutionCode === 'string' ? updateData.solutionCode : '';
       }
 
       // Preserve database flags
@@ -6715,8 +6886,12 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
 
                     // Calculate total max score
                     if (exercise.questions && Array.isArray(exercise.questions)) {
+                      // Same string-concatenation hazard as overallScore
+                      // below: mcqQuestionScore / score are String on a
+                      // number of records, so coerce before summing or the
+                      // Marks denominator comes back glued together too.
                       totalMaxScore = exercise.questions.reduce((sum, q) => {
-                        const qScore = q.mcqQuestionScore || q.score || 10;
+                        const qScore = Number(q.mcqQuestionScore ?? q.score) || 10;
                         return sum + qScore;
                       }, 0);
                     }
@@ -6812,8 +6987,13 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
                 exerciseProgress = userExercise;
                 questionAttempts = userExercise.questions || [];
 
-                // Calculate overall score
-                overallScore = questionAttempts.reduce((sum, q) => sum + (q.score || 0), 0);
+                // Number(q.score) — several exercise records persist the
+                // per-question score as a String, and `0 + "5"` in JS is
+                // string CONCATENATION, so this reduce was emitting
+                // overallScore: "05555505050" (ten questions' scores glued
+                // together) instead of the sum, 35. That string then
+                // rendered verbatim in the Student List Marks column.
+                overallScore = questionAttempts.reduce((sum, q) => sum + (Number(q.score) || 0), 0);
 
                 // Calculate completion percentage
                 const totalQuestions = exerciseDetails.questions?.length || 0;
@@ -7359,6 +7539,31 @@ exports.getStudentExerciseQuestions = async (req, res) => {
     // 8. Get exercise questions and combine with student answers
     const exerciseQuestions = exerciseDetails.questions || [];
 
+    // MCQ questions keep their text in `mcqQuestionTitle`, programming ones in
+    // `title` — reading only `title` meant every MCQ fell through to the
+    // "Question N" placeholder, so the grades Question List showed
+    // "Question 1, Question 2, …" instead of the actual wording, and a trainer
+    // could not tell which question a mark belonged to. `mcqQuestionTitle` is
+    // usually a string but can be an array of rich-content blocks (the
+    // authoring UI allows both), so flatten that to plain text.
+    // `mcqQuestionTitle` is an array of content blocks, each shaped
+    //   { id: "cb-text-…", type: "text", value: "Which data structure …" }
+    // — the wording lives in `value`. Non-text blocks (images and the like)
+    // carry no wording and are skipped so they cannot inject empty strings
+    // or "[object Object]" into the title.
+    const blockText = (b) => {
+      if (typeof b === 'string') return b;
+      if (!b || (b.type && b.type !== 'text')) return '';
+      return b.value ?? b.text ?? b.content ?? '';
+    };
+    const resolveQuestionTitle = (q, index) => {
+      const raw = q.mcqQuestionTitle ?? q.title ?? q.questionTitle;
+      const text = Array.isArray(raw)
+        ? raw.map(blockText).filter(Boolean).join(' ').trim()
+        : (typeof raw === 'string' ? raw.trim() : '');
+      return text || `Question ${index + 1}`;
+    };
+
     const questionsWithStudentAnswers = exerciseQuestions.map((question, index) => {
       const questionId = question._id?.toString();
       const studentAnswer = questionId ? studentAnswerMap.get(questionId) : null;
@@ -7367,10 +7572,15 @@ exports.getStudentExerciseQuestions = async (req, res) => {
       const formattedQuestion = {
         _id: question._id,
         sequence: question.sequence || index + 1,
-        title: question.title || `Question ${index + 1}`,
+        title: resolveQuestionTitle(question, index),
         description: question.description || '',
         difficulty: question.difficulty || 'medium',
-        score: question.score || 10,
+        // Same split as the title above: an MCQ's per-question mark is
+        // `mcqQuestionScore`, so reading only `score` fell through to the
+        // default 10 and the Question List rendered "5/10" for questions
+        // actually worth 5 — disagreeing with both the Manage Exercise list
+        // and the 30/50 total on the Student List.
+        score: Number(question.mcqQuestionScore ?? question.score) || 10,
         timeLimit: question.timeLimit || 2000,
         memoryLimit: question.memoryLimit || 256,
         isActive: question.isActive !== false,

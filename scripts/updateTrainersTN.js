@@ -16,7 +16,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const BASE = "https://lmsserver-yeve.onrender.com";
+const BASE = "https://http://localhost:5533";
 const ROLE_TRAINER = "6a4f8d93aeb945453e9bc06d";
 const STATE_FILE = process.env.SEED_STATE_FILE ||
   path.join(require("os").tmpdir(), "seed-tn-state.json");

@@ -745,6 +745,29 @@ const userSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: "LMS-ClientManagement",
   },
+  // Additional service enrolments beyond the legacy single service above.
+  // The legacy serviceModel/serviceMappingId/clientId/clientName stay the
+  // user's first enrolment; Reassign Users (bulk-add-service) appends here so
+  // a user can belong to several services at once. Readers wanting "all of a
+  // user's services" must union the legacy fields with this array.
+  services: [
+    {
+      serviceMappingId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "LMS-ServiceMapping",
+      },
+      serviceModel: {
+        type: String,
+      },
+      clientId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "LMS-ClientManagement",
+      },
+      clientName: {
+        type: String,
+      },
+    },
+  ],
   permissions: [permissionItemSchema],
   status: {
     type: String,

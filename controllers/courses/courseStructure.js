@@ -10,6 +10,7 @@ const Module1 = mongoose.model("Module1");
 const SubModule1 = mongoose.model("SubModule1");
 const Topic1 = mongoose.model("Topic1");
 const SubTopic1 = mongoose.model("SubTopic1");
+const ProgramCalendar = require("../../models/Courses/ProgramCalendarModel");
 const { createClient } = require("@supabase/supabase-js");
 const { pocCourseFilter, scopeHasCourse } = require("../../utils/pocScope");
 const supabaseKey = process.env.SUPABASE_KEY;
@@ -42,6 +43,28 @@ const parseBatchResources = (value) => {
   }
 };
 const { cascadeDeleteCourses } = require("../../utils/cascadeDeleteCourses");
+
+const countExercisesInPedagogy = (pedagogy) => {
+  if (!pedagogy) return 0;
+  let count = 0;
+  ["I_Do", "We_Do", "You_Do"].forEach((section) => {
+    const sectionData = pedagogy[section];
+    if (!sectionData || typeof sectionData !== "object") return;
+    const entries =
+      sectionData instanceof Map
+        ? Array.from(sectionData.entries())
+        : Object.entries(sectionData);
+    entries.forEach(([, value]) => {
+      if (!value) return;
+      let exercises = [];
+      if (Array.isArray(value)) exercises = value;
+      else if (Array.isArray(value.exercises)) exercises = value.exercises;
+      else if (value._id || value.exerciseInformation) exercises = [value];
+      count += exercises.filter((ex) => ex && (ex._id || ex.exerciseInformation)).length;
+    });
+  });
+  return count;
+};
 
 
 exports.createCourseStructure = async (req, res) => {
@@ -1276,7 +1299,7 @@ exports.getCourseStructure = async (req, res) => {
     // the institution's L&D role — but only if that role exists. Tell views
     // its name (or null) instead of letting them hardcode "L&D (default)".
     // Non-critical — swallow errors so the whole endpoint doesn't 500.
-    const [moduleCounts, hourTotals, defaultApprover] = await Promise.all([
+    const [moduleCounts, hourTotals, exerciseNodes, calendarCourses, defaultApprover] = await Promise.all([
       Module1.aggregate([
         { $match: { courses: { $in: courseIds } } },
         { $group: { _id: "$courses", count: { $sum: 1 } } },
@@ -1298,6 +1321,13 @@ exports.getCourseStructure = async (req, res) => {
         },
         { $group: { _id: "$courses", total: { $sum: "$t" } } },
       ]),
+      Promise.all([
+        Module1.find({ courses: { $in: courseIds } }).select("courses pedagogy").lean(),
+        SubModule1.find({ courses: { $in: courseIds } }).select("courses pedagogy").lean(),
+        Topic1.find({ courses: { $in: courseIds } }).select("courses pedagogy").lean(),
+        SubTopic1.find({ courses: { $in: courseIds } }).select("courses pedagogy").lean(),
+      ]).then((sets) => sets.flat()),
+      ProgramCalendar.find({ courseId: { $in: courseIds } }).select("courseId").lean(),
       findDefaultApproverRole(req.user.institution).catch(() => null),
     ]);
     const moduleCountByCourse = new Map(
@@ -1306,6 +1336,21 @@ exports.getCourseStructure = async (req, res) => {
     const hoursByCourse = new Map(
       hourTotals.map((h) => [h._id.toString(), h.total || 0])
     );
+    const calendarCourseIds = new Set(
+      calendarCourses.map((c) => String(c.courseId))
+    );
+    const courseIdSet = new Set(courseIds.map((id) => String(id)));
+    const exerciseCountByCourse = new Map();
+    exerciseNodes.forEach((node) => {
+      const nodeCount = countExercisesInPedagogy(node.pedagogy);
+      if (!nodeCount) return;
+      const nodeCourses = Array.isArray(node.courses) ? node.courses : [node.courses];
+      nodeCourses.forEach((courseId) => {
+        const id = String(courseId || "");
+        if (!courseIdSet.has(id)) return;
+        exerciseCountByCourse.set(id, (exerciseCountByCourse.get(id) || 0) + nodeCount);
+      });
+    });
 
     // Summary mode skips populate, so a roster entry pointing at a DELETED
     // user still carries its raw ObjectId — the populated path nulls those
@@ -1357,11 +1402,13 @@ exports.getCourseStructure = async (req, res) => {
       return {
         ...base,
         moduleCount,
+        exerciseCount: exerciseCountByCourse.get(course._id.toString()) || 0,
         participantCount: seen.size,
         defaultApproverRole: defaultApprover ? defaultApprover.roleName : null,
         // The Program Calendar's gate: at least one module AND hours entered.
         hasModuleHours:
           moduleCount > 0 && (hoursByCourse.get(course._id.toString()) || 0) > 0,
+        hasProgramCalendar: calendarCourseIds.has(course._id.toString()),
       };
     });
 

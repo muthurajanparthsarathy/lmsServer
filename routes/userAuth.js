@@ -16,6 +16,7 @@ const {
   getAllTokens,
   toggleUserStatus,
   bulkToggleUserStatus,
+  bulkAddServiceToUsers,
   bulkUploadUsers,
   UpdateUserWithPermission,
   GetMyPermission,
@@ -53,6 +54,9 @@ router.delete('/delete/users/:userId',userAuth, DeleteUser)
 router.put("/user/status/:userId",userAuth,  toggleUserStatus);
 
 router.put("/user/bulk-status",userAuth,  bulkToggleUserStatus);
+
+// Reassign Users: ADD one service to many users (keeps their existing services)
+router.put("/user/bulk-add-service",userAuth,  bulkAddServiceToUsers);
 
 
 router.post('/user/bulk-upload-users',userAuth, bulkUploadUsers)
