@@ -3478,6 +3478,41 @@ exports.addQuestion = async (req, res) => {
               && questionData.codeSetupLanguage)
             ? questionData.codeSetupLanguage
             : undefined,
+          // ── Execution Setup — Function/Full Program + Blank/Generated/
+          // Custom. Persist so re-opening the question editor restores the
+          // exact choice the teacher last saved; before this the schema
+          // silently dropped these fields (they weren't declared) and the
+          // form always fell back to Blank Editor. Link questions carry
+          // none of these. ──
+          executionType: (questionData.isLinkQuestion !== true
+              && (questionData.executionType === 'function' || questionData.executionType === 'fullProgram'))
+            ? questionData.executionType
+            : undefined,
+          functionContract: (questionData.isLinkQuestion !== true
+              && questionData.functionContract && typeof questionData.functionContract === 'object')
+            ? questionData.functionContract
+            : undefined,
+          startingExperience: (questionData.isLinkQuestion !== true
+              && (questionData.startingExperience === 'blank'
+                  || questionData.startingExperience === 'generated'
+                  || questionData.startingExperience === 'custom'))
+            ? questionData.startingExperience
+            : undefined,
+          // ── Author-provided taxonomy (2026-08-30 UI redesign) ──
+          // `category` is a single preset string from the client-side
+          // QUESTION_CATEGORIES list, or '' / omitted for uncategorised.
+          // `tags` is a small array of short strings. Both persist through
+          // the schema's `strict: false` (no schema change needed); the
+          // client reads them back via `loadQuestionIntoForm`. The Remove
+          // undefined pass below drops them when the client sent nothing.
+          category: (typeof questionData.category === 'string' && questionData.category.trim())
+            ? questionData.category.trim()
+            : undefined,
+          tags: Array.isArray(questionData.tags) && questionData.tags.length > 0
+            ? questionData.tags
+                .filter(t => typeof t === 'string' && t.trim())
+                .map(t => t.trim())
+            : undefined,
         });
 
         // Remove undefined fields
@@ -4300,6 +4335,35 @@ if (updateData.source) {
           ? updateData.codeSetupLanguage
           : undefined;
       }
+      // Execution Setup — round-trip the Function/Full Program +
+      // Blank/Generated/Custom choice so the question editor loads back
+      // the way the teacher saved it. Link questions clear the trio.
+      if (updatedQuestion.isLinkQuestion === true) {
+        updatedQuestion.executionType = undefined;
+        updatedQuestion.functionContract = undefined;
+        updatedQuestion.startingExperience = undefined;
+      } else {
+        if (updateData.executionType !== undefined) {
+          updatedQuestion.executionType =
+            (updateData.executionType === 'function' || updateData.executionType === 'fullProgram')
+              ? updateData.executionType
+              : undefined;
+        }
+        if (updateData.functionContract !== undefined) {
+          updatedQuestion.functionContract =
+            (updateData.functionContract && typeof updateData.functionContract === 'object')
+              ? updateData.functionContract
+              : undefined;
+        }
+        if (updateData.startingExperience !== undefined) {
+          updatedQuestion.startingExperience =
+            (updateData.startingExperience === 'blank'
+              || updateData.startingExperience === 'generated'
+              || updateData.startingExperience === 'custom')
+              ? updateData.startingExperience
+              : undefined;
+        }
+      }
     } else if (finalQuestionType === 'database') {
       // Update Database fields
       if (updateData.title !== undefined) {
@@ -4492,6 +4556,27 @@ if (updateData.source) {
         updatedQuestion.attachments = Array.isArray(updateData.attachments) ? updateData.attachments : [];
       }
     }
+
+    // ── Author-provided taxonomy (2026-08-30 UI redesign) ──
+    // `category` (single string) and `tags` (short array of strings) are
+    // set from the Question details section of the Programming form. Kept
+    // outside the type-specific blocks so they persist across every
+    // question type as those forms adopt the same UI. `undefined` = client
+    // didn't send the field, so leave the existing value alone; empty
+    // string or empty array = teacher explicitly cleared it.
+    if (updateData.category !== undefined) {
+      updatedQuestion.category = typeof updateData.category === 'string'
+        ? updateData.category.trim()
+        : '';
+    }
+    if (updateData.tags !== undefined) {
+      updatedQuestion.tags = Array.isArray(updateData.tags)
+        ? updateData.tags
+            .filter(t => typeof t === 'string' && t.trim())
+            .map(t => t.trim())
+        : [];
+    }
+
     // Update timestamp
     updatedQuestion.updatedAt = new Date();
 

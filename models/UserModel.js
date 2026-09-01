@@ -614,7 +614,14 @@ const notificationSchema = new mongoose.Schema({
   },
   relatedEntity: {
     type: String,
-    enum: ['course', 'assignment', 'announcement', 'enrollment', 'system',],
+    // 'exercise' + 'question' were being pushed by other flows without ever
+    // being declared here, so every user.save() on a user whose notifications
+    // array contained one exploded on validation ("`exercise` is not a valid
+    // enum value" from submitMultipleFiles' final user.save). Widening the
+    // enum keeps the historical rows valid and lets future notifications
+    // point at the right entity type instead of getting misfiled as
+    // 'assignment'.
+    enum: ['course', 'assignment', 'exercise', 'question', 'announcement', 'enrollment', 'system'],
     default: 'enrollment'
   },
   relatedEntityId: {

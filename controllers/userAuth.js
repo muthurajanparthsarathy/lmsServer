@@ -1033,6 +1033,77 @@ async function getUserAccessStats(req, res, filter) {
   });
 }
 
+/**
+ * How many users hold each role, counted in Mongo.
+ *
+ * Behind the user-count button on the User Management page: the button shows
+ * the institution total, the modal breaks it down. Counting is the entire job,
+ * so no documents cross the wire and the response stays a few hundred bytes
+ * whether the institution has 179 users or 100,000.
+ *
+ * Scoped to the INSTITUTION only, deliberately — it answers "who is in this
+ * directory", not "what is the table filtered to right now", so the figures do
+ * not move while the operator types in the search box.
+ */
+async function getUserAccessRoleCounts(req, res, filter) {
+  // Same casting note as getUserAccessStats: aggregate() does not cast a
+  // filter the way find() does, so an uncast institution id matches nothing.
+  const match = User.find(filter).cast(User);
+
+  const roles = await User.aggregate([
+    { $match: match },
+    { $group: { _id: '$role', count: { $sum: 1 } } },
+    { $lookup: { from: 'roles', localField: '_id', foreignField: '_id', as: '_r' } },
+    {
+      $project: {
+        _id: 0,
+        count: 1,
+        // Null for users carrying no role at all — they still get a row, since
+        // a directory total that silently omits them would not add up.
+        roleId: { $ifNull: [{ $toString: '$_id' }, ''] },
+        // renameRole is the label the admin UI shows everywhere else;
+        // originalRole is the fallback for roles predating renaming. An EMPTY
+        // string has to fall through too, which $ifNull alone would not do.
+        //
+        // `role` is not one shape across the collection: measured live, 359
+        // users hold an ObjectId ref and 20 legacy rows hold a plain STRING
+        // like "Student". The $lookup finds nothing for those, and the stored
+        // string IS the name — without that branch a whole institution's
+        // users are reported under "No role".
+        name: {
+          $let: {
+            vars: {
+              renamed: { $ifNull: [{ $first: '$_r.renameRole' }, ''] },
+              original: { $ifNull: [{ $first: '$_r.originalRole' }, ''] },
+              raw: { $cond: [{ $eq: [{ $type: '$_id' }, 'string'] }, '$_id', ''] },
+            },
+            in: {
+              $switch: {
+                branches: [
+                  { case: { $ne: ['$$renamed', ''] }, then: '$$renamed' },
+                  { case: { $ne: ['$$original', ''] }, then: '$$original' },
+                  { case: { $ne: ['$$raw', ''] }, then: '$$raw' },
+                ],
+                default: 'No role',
+              },
+            },
+          },
+        },
+      },
+    },
+    // Biggest bucket first, which is the order the modal lists them in.
+    { $sort: { count: -1, name: 1 } },
+  ]);
+
+  const total = roles.reduce((sum, r) => sum + r.count, 0);
+
+  return res.status(200).json({
+    message: [{ key: 'success', value: 'User role counts retrieved' }],
+    total,
+    roles,
+  });
+}
+
 exports.getUserAccess = async (req, res) => {
   try {
     const { instutionId } = req.params;
@@ -1068,6 +1139,13 @@ exports.getUserAccess = async (req, res) => {
     // Counting is what a database is for.
     if (req.query.stats === '1' || req.query.stats === 'true') {
       return await getUserAccessStats(req, res, filter);
+    }
+
+    // ── Role-count mode (opt-in via `roleCounts=1`) ──────────────────────────
+    // The user-count button and its breakdown modal. Same reasoning as stats
+    // above: the page renders numbers, so only numbers are fetched.
+    if (req.query.roleCounts === '1' || req.query.roleCounts === 'true') {
+      return await getUserAccessRoleCounts(req, res, filter);
     }
 
     // Get all users. The exclusion projection drops the fields no consumer of

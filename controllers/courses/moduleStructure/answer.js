@@ -561,24 +561,45 @@ exports.submitAnswer = async (req, res) => {
           });
           score = judged.score;
           status = judged.status;
+          // Hidden-case reveal policy — PROGRESSIVE. Once every visible
+          // case passes, hidden cases unlock ONE BY ONE in order: reveal
+          // the first hidden case; keep revealing subsequent ones only
+          // while each one passes. Stop AT the first failing hidden case
+          // (that one is revealed too so the student can debug it, but
+          // nothing beyond it is). If any visible case still fails, no
+          // hidden case is revealed. `actualOutput` (the student's own
+          // program output) is always safe to show — this only gates
+          // trainer input/expected.
+          const visibleCases = judged.perCase.filter((c) => !c.hidden);
+          const allVisiblePassed = visibleCases.length > 0 && visibleCases.every((c) => c.passed);
+          const unlockedHiddenIdx = new Set();
+          if (allVisiblePassed) {
+            for (const c of judged.perCase) {
+              if (!c.hidden) continue;
+              unlockedHiddenIdx.add(c.index);
+              if (!c.passed) break;
+            }
+          }
           evaluationBreakdown = {
             method: 'testcase',
             testcase: {
               passed: judged.passed,
               total: judged.total,
-              cases: judged.perCase.map((c) => ({
-                index: c.index,
-                passed: c.passed,
-                hidden: c.hidden,
-                // Blank trainer-authored fields (input + expected) on hidden
-                // cases, but KEEP the student's own actualOutput — that's
-                // their own code's output, not a trainer secret. Students
-                // need it to debug format mismatches ("I returned 'true'
-                // but expected 'Even' — different type").
-                input: c.hidden ? '' : c.input,
-                expectedOutput: c.hidden ? '' : c.expectedOutput,
-                actualOutput: c.actualOutput,
-              })),
+              cases: judged.perCase.map((c) => {
+                const revealed = !c.hidden || unlockedHiddenIdx.has(c.index);
+                return {
+                  index: c.index,
+                  passed: c.passed,
+                  hidden: c.hidden,
+                  // `unlocked` = client should show this hidden case's chip.
+                  // Non-hidden cases don't need the flag but leaving it as
+                  // true keeps the client filter uniform.
+                  unlocked: revealed,
+                  input: revealed ? c.input : '',
+                  expectedOutput: revealed ? c.expectedOutput : '',
+                  actualOutput: c.actualOutput,
+                };
+              }),
             },
           };
         } else if (q) {
@@ -1825,19 +1846,37 @@ exports.submitMultipleFiles = async (req, res) => {
           });
           score = judged.score;
           status = judged.status;
+          // Multi-file mirror of the single-file progressive reveal —
+          // hidden cases unlock one by one once every visible case passes;
+          // stop AT the first failing hidden (that one is revealed for
+          // debugging; nothing beyond it is).
+          const visibleCases = judged.perCase.filter((c) => !c.hidden);
+          const allVisiblePassed = visibleCases.length > 0 && visibleCases.every((c) => c.passed);
+          const unlockedHiddenIdx = new Set();
+          if (allVisiblePassed) {
+            for (const c of judged.perCase) {
+              if (!c.hidden) continue;
+              unlockedHiddenIdx.add(c.index);
+              if (!c.passed) break;
+            }
+          }
           evaluationBreakdown = {
             method: 'testcase',
             testcase: {
               passed: judged.passed,
               total: judged.total,
-              cases: judged.perCase.map((c) => ({
-                index: c.index,
-                passed: c.passed,
-                hidden: c.hidden,
-                input: c.hidden ? '' : c.input,
-                expectedOutput: c.hidden ? '' : c.expectedOutput,
-                actualOutput: c.actualOutput,
-              })),
+              cases: judged.perCase.map((c) => {
+                const revealed = !c.hidden || unlockedHiddenIdx.has(c.index);
+                return {
+                  index: c.index,
+                  passed: c.passed,
+                  hidden: c.hidden,
+                  unlocked: revealed,
+                  input: revealed ? c.input : '',
+                  expectedOutput: revealed ? c.expectedOutput : '',
+                  actualOutput: c.actualOutput,
+                };
+              }),
             },
           };
         } else if (!q) {

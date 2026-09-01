@@ -527,6 +527,17 @@ exports.createQuestionBank = async (req, res) => {
           starterCode: question.starterCode ?? '',
           solutionCode: question.solutionCode ?? '',
           codeSetupLanguage: question.codeSetupLanguage || '',
+          // Execution Setup — round-trip so the question editor restores the
+          // same Function/Full Program + Blank/Generated/Custom choice on
+          // reload; schema whitelist was silently dropping these before.
+          executionType: (question.executionType === 'function' || question.executionType === 'fullProgram')
+            ? question.executionType : undefined,
+          functionContract: (question.functionContract && typeof question.functionContract === 'object')
+            ? question.functionContract : undefined,
+          startingExperience: (question.startingExperience === 'blank'
+              || question.startingExperience === 'generated'
+              || question.startingExperience === 'custom')
+            ? question.startingExperience : undefined,
           timeLimit: question.timeLimit || 2000,
           memoryLimit: question.memoryLimit || 256,
           isActive: question.isActive !== undefined ? question.isActive : true,
@@ -1587,6 +1598,20 @@ exports.updateQuestionBank = async (req, res) => {
         starterCode: question.starterCode !== undefined ? question.starterCode : (existingQuestion.starterCode ?? ''),
         solutionCode: question.solutionCode !== undefined ? question.solutionCode : (existingQuestion.solutionCode ?? ''),
         codeSetupLanguage: question.codeSetupLanguage !== undefined ? question.codeSetupLanguage : (existingQuestion.codeSetupLanguage || ''),
+        // Execution Setup — round-trip on update the same way as insert, so
+        // editing a question after save preserves the Function/Full Program +
+        // Blank/Generated/Custom selection.
+        executionType: (question.executionType === 'function' || question.executionType === 'fullProgram')
+          ? question.executionType
+          : (existingQuestion.executionType || undefined),
+        functionContract: (question.functionContract !== undefined)
+          ? ((question.functionContract && typeof question.functionContract === 'object') ? question.functionContract : null)
+          : (existingQuestion.functionContract ?? null),
+        startingExperience: (question.startingExperience === 'blank'
+            || question.startingExperience === 'generated'
+            || question.startingExperience === 'custom')
+          ? question.startingExperience
+          : (existingQuestion.startingExperience || undefined),
         timeLimit: question.timeLimit || existingQuestion.timeLimit || 2000,
         memoryLimit: question.memoryLimit || existingQuestion.memoryLimit || 256,
         isActive: question.isActive !== undefined ? question.isActive : existingQuestion.isActive,

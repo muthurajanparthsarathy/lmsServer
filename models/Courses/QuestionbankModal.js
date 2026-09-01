@@ -188,6 +188,15 @@ const questionsSchema = new mongoose.Schema({
   starterCode: { type: mongoose.Schema.Types.Mixed, default: '' },
   solutionCode: { type: mongoose.Schema.Types.Mixed, default: '' },
   codeSetupLanguage: { type: String, default: '' },
+  // Execution Setup — how the student submission is executed and graded.
+  // Persist alongside starterCode so re-opening the question editor
+  // restores the exact Function/Full Program + Blank/Generated/Custom
+  // choice the teacher last saved. Mixed on functionContract so the
+  // { functionName, returnType, parameters[] } shape round-trips without
+  // needing a nested sub-schema per question type.
+  executionType: { type: String, enum: ['function', 'fullProgram'], default: 'fullProgram' },
+  functionContract: { type: mongoose.Schema.Types.Mixed, default: null },
+  startingExperience: { type: String, enum: ['blank', 'generated', 'custom'], default: 'blank' },
   timeLimit: { type: Number, min: 0, max: 10000 },
   memoryLimit: { type: Number, min: 0, max: 1024 },
   
