@@ -821,6 +821,12 @@ exports.getAllCoursesData = async (req, res) => {
     const requestedBatch = req.query.batchId || req.query.batchName;
     const viewerBatchId = resolveViewerBatchId(course, req.user, requestedBatch);
     scopeCourseTreePedagogy(structuredCourse, course, viewerBatchId);
+    // Targeted visibility diagnostic (course-level twin of the one in
+    // getNodePedagogy): who asked and which batch their whole-tree view was
+    // scoped to. Per-node before/after key detail lives on the node endpoint.
+    console.log(
+      `[courses-data] user=${req.user?._id || "anon"} batch=${viewerBatchId || "shared"} course=${courseId}`
+    );
 
     const filterExerciseList = (exercises) => {
       if (!Array.isArray(exercises)) return exercises;
@@ -1281,6 +1287,34 @@ exports.getAllCoursesDataLight = async (req, res) => {
 //
 // We also surface `testConfiguration` because the client reads that on the
 // selected node for the I-Do tab strip (line 1087 in page.tsx).
+// Compact one-line description of a pedagogy container for the visibility
+// diagnostics: per tab, each subcategory with its file/folder/page/group
+// counts, e.g. `I_Do:{letcure:f4/d1/p3/g1}`. Handles Map and plain-object
+// shapes (lean vs live documents).
+const summarizePedagogyKeys = (pedagogy) => {
+  if (!pedagogy) return "none";
+  const parts = [];
+  for (const tab of ["I_Do", "We_Do", "You_Do"]) {
+    const section = pedagogy[tab];
+    if (!section) continue;
+    const entries =
+      section instanceof Map ? Array.from(section.entries()) : Object.entries(section);
+    if (!entries.length) continue;
+    const subs = entries.map(([k, v]) => {
+      const files = Array.isArray(v?.files) ? v.files.length : 0;
+      const folders = Array.isArray(v?.folders) ? v.folders.length : 0;
+      const pages = Array.isArray(v?.pages) ? v.pages.length : 0;
+      const groupIds = new Set();
+      (Array.isArray(v?.files) ? v.files : []).forEach((f) => f?.groupId && groupIds.add(String(f.groupId)));
+      (Array.isArray(v?.pages) ? v.pages : []).forEach((p) => p?.groupId && groupIds.add(String(p.groupId)));
+      (Array.isArray(v?.folders) ? v.folders : []).forEach((f) => f?.parentGroupId && groupIds.add(String(f.parentGroupId)));
+      return `${k}:f${files}/d${folders}/p${pages}/g${groupIds.size}`;
+    });
+    parts.push(`${tab}:{${subs.join(",")}}`);
+  }
+  return parts.length ? parts.join(" ") : "empty";
+};
+
 exports.getNodePedagogy = async (req, res) => {
   try {
     const { type, id } = req.params;
@@ -1329,7 +1363,14 @@ exports.getNodePedagogy = async (req, res) => {
     if (course) {
       const requestedBatch = req.query.batchId || req.query.batchName;
       const viewerBatchId = resolveViewerBatchId(course, req.user, requestedBatch);
+      const keysBefore = summarizePedagogyKeys(node.pedagogy);
       scopeNodePedagogy(node, course, viewerBatchId);
+      // Targeted visibility diagnostic — one line per read: who asked, which
+      // batch they resolved to, what the node held before/after scoping.
+      console.log(
+        `[node-pedagogy] user=${req.user?._id || "anon"} batch=${viewerBatchId || "shared"} node=${id}` +
+        ` before=${keysBefore} after=${summarizePedagogyKeys(node.pedagogy)}`
+      );
       node.resourceBatchContext = buildResourceBatchContext(course, req.user, requestedBatch);
     } else {
       delete node.batchPedagogy;

@@ -227,9 +227,20 @@ const quotaDifficultyOf = (q) => {
   return d === 'easy' || d === 'hard' ? d : 'medium';
 };
 
-// 'scratch-manual' and 'scratch-bank' both bill the Manual slice — the bank is
-// Manual's second entry point, not a source of its own. Untagged questions bill
-// Manual too: they predate source tagging and were authored by hand.
+// Shared Manual bucket — parity with client `quotaModel.srcToBucket`
+// (client/src/app/lms/component/questionsource/quotaModel.ts).
+//
+// Every entry method that isn't AI or Other Platform is billed against the
+// same Manual pool:
+//   • scratch-manual   → user typed the question
+//   • scratch-bank     → imported from Question Bank
+//   • scratch-upload   → imported from Document Upload
+//   • (untagged legacy) → predates source tagging, treated as scratch
+//
+// The on-disk `customDistribution.<difficulty>.scratch` column carries this
+// pool's per-difficulty quota. Client and server MUST agree on this mapping
+// so the client's "Manual: 3/5 — 2 remaining" and the server's rejection
+// message describe the exact same bucket.
 const quotaSourceOf = (q) => {
   const s = (q?.source || '').toString();
   if (s.startsWith('thirdParty')) return 'thirdParty';
@@ -385,7 +396,13 @@ const validateQuestionQuota = (ex, questionsToAdd) => {
       if (usedSlice >= sliceLimit) {
         const srcLabel = srcKey === 'ai' ? 'AI' : srcKey === 'thirdParty' ? 'Other Platform' : 'Manual';
         const scope = perDifficulty ? ` ${diff}` : '';
-        return `${label}: the${scope} ${srcLabel} quota${where} is full (${usedSlice}/${sliceLimit}). Use a different source or delete one of its questions.`;
+        // Manual is the shared pool for Scratch / Question Bank / Document
+        // Upload; the message names all three so the caller doesn't hunt for
+        // a phantom "Question Bank quota".
+        const sharedNote = srcKey === 'scratch'
+          ? ' Manual is shared by Scratch, Question Bank and Document Upload — free a slot in any of them.'
+          : ' Use a different source or delete one of its questions.';
+        return `${label}: the${scope} ${srcLabel} quota${where} is full (${usedSlice}/${sliceLimit}).${sharedNote}`;
       }
     }
 
