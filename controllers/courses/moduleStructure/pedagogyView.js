@@ -48,6 +48,10 @@ const {
 } = require('../../../utils/batchResources');
 const { resolvePedagogyScope } = require('../../../utils/pedagogyScope');
 const { isStudentRequester, isExerciseStudentVisible } = require('../../../utils/approvalWorkflow');
+// Topic-completion aggregator — server is authoritative for the sidebar tick.
+// Called after pedagogy filtering (approval + batch scoping) so its counts
+// match exactly what the client renders.
+const { computeCourseTopicProgress, findStudentAnswers } = require('../../../utils/topicCompletion');
 
 const SLIDE_CONVERTIBLE_MIMES = [
   'application/vnd.ms-powerpoint',
@@ -871,6 +875,21 @@ exports.getAllCoursesData = async (req, res) => {
     // Blank hidden testCases before returning the full course tree.
     // Author-like roles see the real inputs; students get blanks.
     stripHiddenForStudentDeep(structuredCourse, req.user);
+
+    // Per-node topic completion for the sidebar's green tick. Runs after
+    // approval + batch scoping so the counts include only what the caller
+    // actually sees. Anonymous callers (userAuthOptional) get an empty map
+    // — the client falls back to `not_started` for every node.
+    const callerUserId = req.user?._id ? String(req.user._id) : null;
+    if (callerUserId) {
+      const answers = findStudentAnswers(structuredCourse, callerUserId);
+      structuredCourse.topicProgress = computeCourseTopicProgress(
+        structuredCourse,
+        answers,
+      );
+    } else {
+      structuredCourse.topicProgress = {};
+    }
 
     res.status(200).json({
       success: true,
