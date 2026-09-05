@@ -350,15 +350,27 @@ async function getMappingsPaginated(req, res, institutionId) {
           ],
         }
         : {
+          // Default scope = the Service Mapping workspace table. It groups by
+          // CLIENT and renders only three columns of substance: Client Name,
+          // Business Model, and a Services (count + active) chip. The search
+          // haystack must contain exactly what the reader can see — anything
+          // more surfaces false positives that look like the search is broken.
+          // Reported case: searching "Q" returned "Vaigai InfoTech" because a
+          // hidden courseName under that client (e.g. "SQL basics") matched.
+          //
+          // Kept: client.clientCompany, client.businessModel, the mapping's
+          //   service name, and its serviceModels[] entries — all of them
+          //   drive rows the reader can point at in this view.
+          // Dropped: year (no year column in this view), courseName (hidden),
+          //   partner clientCompanies (never surfaced in this row's cells),
+          //   any raw id/metadata (never was here, still isn't).
           $concatArrays: [
             [
               { $first: "$_client.clientCompany" },
-              "$year",
-              "$courseName",
+              { $first: "$_client.businessModel" },
+              "$service",
             ],
-            // Partners are clients too, and a partner's name is why its row is
-            // in the list — so they stay.
-            { $ifNull: ["$_partners.clientCompany", []] },
+            { $ifNull: ["$serviceModels", []] },
           ],
         };
     pipeline.push({

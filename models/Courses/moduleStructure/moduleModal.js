@@ -486,6 +486,14 @@ const approvalWorkflowSchema = new mongoose.Schema({
   },
   studentVisible: { type: Boolean, default: false },  // gates student visibility
   initiatedAt: { type: Date, default: null },
+  // Who submitted the exercise for approval. Captured at snapshot time so
+  // the approver's queue can show the trainer's name/email without needing
+  // to look up the exercise's createdBy separately, and so the record
+  // survives an edit to the trainer's account name (or its later
+  // deletion) — the pending row keeps the frozen identity.
+  initiatedByUserId: { type: mongoose.Schema.Types.ObjectId, ref: "LMS-User", default: null },
+  initiatedByName: { type: String, default: "" },
+  initiatedByEmail: { type: String, default: "" },
   completedAt: { type: Date, default: null },
   // Set to true whenever the trainer saves an edit (or adds a question)
   // while the workflow is in `rejected`. Lets the approver's UI show a

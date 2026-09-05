@@ -1,4 +1,6 @@
 const mongoose = require("mongoose");
+const fs = require("fs");
+const path = require("path");
 const ClientManagement = require("../models/ClientManagementModel");
 const { pocClientFilter, scopeHasClient } = require("../utils/pocScope");
 
@@ -611,6 +613,96 @@ const clientManagementController = {
       res.status(500).json({
         success: false,
         message: "Error toggling client status",
+        error: error.message,
+      });
+    }
+  },
+
+  // Upload a client logo. Accepts a single image file (jpg, png or webp)
+  // under the field name `logo`, writes it to Server/uploads/client-logos/
+  // with an institution-scoped, collision-free filename, and returns the
+  // ABSOLUTE URL the frontend can save on the client record. server.js
+  // exposes Server/uploads/ at /uploads/... so this URL is fetchable by
+  // any browser that can reach this API host.
+  //
+  // Deliberately does NOT mutate any client record: the ADD flow uploads
+  // BEFORE the client exists (there's no id yet), and the edit flow
+  // separately submits the URL through updateClient. Keeping this endpoint
+  // pure means both flows share the same upload path.
+  uploadClientLogo: async (req, res) => {
+    try {
+      const file = req.files && (req.files.logo || req.files.file);
+      if (!file) {
+        return res.status(400).json({
+          success: false,
+          message: "No logo file uploaded (expected multipart field 'logo')",
+        });
+      }
+
+      // jpg/png/webp only. The check is on BOTH mimetype and extension:
+      // mimetype alone is set by the client and easy to spoof, extension
+      // alone misses files that were renamed. Either one lying is enough
+      // to reject.
+      const ALLOWED_MIME = new Set([
+        "image/jpeg",
+        "image/jpg",
+        "image/png",
+        "image/webp",
+      ]);
+      const ALLOWED_EXT = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+      const ext = path.extname(String(file.name || "")).toLowerCase();
+      if (!ALLOWED_MIME.has(String(file.mimetype || "").toLowerCase()) || !ALLOWED_EXT.has(ext)) {
+        return res.status(400).json({
+          success: false,
+          message: "Only JPG, PNG or WebP images are allowed",
+        });
+      }
+
+      // 5 MB cap for a logo — enough for a large PNG, small enough that a
+      // sloppy screenshot upload doesn't fill the disk. The global
+      // express-fileupload limit is 100 MB, so this is the tighter of the
+      // two and applies first.
+      const MAX_BYTES = 5 * 1024 * 1024;
+      if (file.size > MAX_BYTES) {
+        return res.status(400).json({
+          success: false,
+          message: "Logo must be 5 MB or smaller",
+        });
+      }
+
+      const institutionId = req.user && req.user.institution
+        ? String(req.user.institution)
+        : "shared";
+      const dir = path.join(__dirname, "..", "uploads", "client-logos", institutionId);
+      fs.mkdirSync(dir, { recursive: true });
+
+      // Filename: <timestamp>_<random>.ext. The original name isn't reused —
+      // callers control it and it could contain path separators, spaces, or
+      // duplicates that would collide. Extension IS taken from the (validated)
+      // original so the URL stays servable with the right Content-Type.
+      const uniqueName = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}${ext}`;
+      const absPath = path.join(dir, uniqueName);
+      await file.mv(absPath);
+
+      // Absolute URL: the record travels across environments and the URL
+      // must work from any browser, so anchor to the request's own origin
+      // rather than a bare path. Behind a proxy `req.get('host')` still
+      // reports the public host when trust proxy is set (server.js already
+      // reads `X-Forwarded-*` for other routes).
+      const proto = (req.headers["x-forwarded-proto"] || req.protocol || "http").toString().split(",")[0].trim();
+      const host = req.get("host");
+      const publicUrl = `${proto}://${host}/uploads/client-logos/${institutionId}/${uniqueName}`;
+
+      res.status(201).json({
+        success: true,
+        message: "Client logo uploaded",
+        data: { url: publicUrl },
+      });
+    } catch (error) {
+      console.error("Error uploading client logo:", error);
+      res.status(500).json({
+        success: false,
+        message: "Error uploading client logo",
         error: error.message,
       });
     }

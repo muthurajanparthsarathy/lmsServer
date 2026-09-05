@@ -69,8 +69,15 @@ const getEffectiveHierarchySteps = async (course) => {
  * back to the institution's L&D role when the course has no hierarchy.
  * Returns null only when neither exists (caller decides whether to reject
  * the request or proceed without workflow).
+ *
+ * `submittedBy` — optional; when provided, its user id / name / email are
+ * snapshotted on the workflow so the pending-approvals endpoint can render
+ * "Submitted by …" without a per-row user lookup. Kept optional so
+ * historical call sites (which don't have the caller in scope) still
+ * function; they store the workflow without the submitter and the
+ * endpoint falls back to the exercise's own createdBy.
  */
-const buildInitialApprovalWorkflow = async (courseId) => {
+const buildInitialApprovalWorkflow = async (courseId, submittedBy = null) => {
   if (!courseId) return null;
   const course = await CourseStructure.findById(courseId)
     .select("approvalHierarchy institution")
@@ -103,6 +110,9 @@ const buildInitialApprovalWorkflow = async (courseId) => {
     overallStatus: "in_progress",
     studentVisible: false,
     initiatedAt: new Date(),
+    initiatedByUserId: submittedBy?.userId || null,
+    initiatedByName: submittedBy?.name || "",
+    initiatedByEmail: submittedBy?.email || "",
     completedAt: null,
   };
 };

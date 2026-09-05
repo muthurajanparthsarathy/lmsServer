@@ -6,6 +6,7 @@ const {
   updateClient,
   deleteClient,
   toggleClientStatus,
+  uploadClientLogo,
 } = require("../controllers/clientManagementController");
 const { userAuth } = require("../middlewares/userAuth");
 const { attachPocScope, guardClientWrite } = require("../middlewares/pocScope");
@@ -28,5 +29,12 @@ router.get("/client-management/getById/:clientId", getClientById);
 router.put("/client-management/update/:clientId", guardClientWrite(), updateClient);
 router.delete("/client-management/delete/:clientId", guardClientWrite(), deleteClient);
 router.put("/client-management/toggle-status/:clientId", guardClientWrite(), toggleClientStatus);
+
+// Logo upload — pure file-to-URL, does not touch any client record. Callers
+// (Add form on a client that doesn't exist yet, or Edit form on one that
+// does) POST the file here and get back an absolute URL, which then travels
+// on the normal create/update payload as `clientLogo`. Not guarded by
+// guardClientWrite: no client-scoped effect happens here.
+router.post("/client-management/upload-logo", uploadClientLogo);
 
 module.exports = router;

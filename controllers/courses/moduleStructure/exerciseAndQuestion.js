@@ -1232,7 +1232,19 @@ exports.addExercise = async (req, res) => {
     let approvalWorkflowData = null;
     if (availabilityPeriodData.requiresAdminApproval) {
       const courseIdForWorkflow = resolveCourseId(entity);
-      approvalWorkflowData = await buildInitialApprovalWorkflow(courseIdForWorkflow);
+      // Capture the trainer who submitted this for approval — the Pending
+      // Approvals queue shows this as "Submitted by …", and the snapshot
+      // means the record survives a later rename or deactivation of the
+      // trainer's account.
+      const submitterName = [req.user?.firstName, req.user?.lastName].filter(Boolean).join(" ")
+        || req.user?.email
+        || "Trainer";
+      const submittedBy = {
+        userId: req.user?._id || req.user?.id || null,
+        name: submitterName,
+        email: req.user?.email || "",
+      };
+      approvalWorkflowData = await buildInitialApprovalWorkflow(courseIdForWorkflow, submittedBy);
       if (!approvalWorkflowData) {
         return res.status(400).json({
           message: [{
@@ -9436,7 +9448,15 @@ exports.addYouDoExercise = async (req, res) => {
     let approvalWorkflowData = null;
     if (availabilityPeriodData.requiresAdminApproval) {
       const courseIdForWorkflow = resolveCourseId(entity);
-      approvalWorkflowData = await buildInitialApprovalWorkflow(courseIdForWorkflow);
+      const submitterName = [req.user?.firstName, req.user?.lastName].filter(Boolean).join(" ")
+        || req.user?.email
+        || "Trainer";
+      const submittedBy = {
+        userId: req.user?._id || req.user?.id || null,
+        name: submitterName,
+        email: req.user?.email || "",
+      };
+      approvalWorkflowData = await buildInitialApprovalWorkflow(courseIdForWorkflow, submittedBy);
       if (!approvalWorkflowData) {
         return res.status(400).json({
           message: [{
@@ -10750,6 +10770,7 @@ exports.listPendingApprovals = async (req, res) => {
               pending.push({
                 exerciseId: ex._id,
                 exerciseName: ex.exerciseInformation?.exerciseName,
+                exerciseType: ex.exerciseType || '',
                 courseId,
                 entityType: kind,
                 entityId: doc._id,
@@ -10767,6 +10788,15 @@ exports.listPendingApprovals = async (req, res) => {
                 currentStep: wf.currentStep,
                 totalSteps: wf.steps?.length || 0,
                 initiatedAt: wf.initiatedAt,
+                // Submitter identity — captured on the workflow itself
+                // (initiatedByUserId/Name/Email since 2026-09-04); older
+                // exercises without those fields fall back to the raw
+                // createdBy email on the exercise document.
+                submittedBy: {
+                  userId: wf.initiatedByUserId || null,
+                  name: wf.initiatedByName || '',
+                  email: wf.initiatedByEmail || ex.createdBy || '',
+                },
                 resubmissionCount: wf.resubmissionCount || 0,
                 approvalScope: ex.availabilityPeriod?.approvalScope || 'settings',
               });
@@ -10776,7 +10806,52 @@ exports.listPendingApprovals = async (req, res) => {
       }
     }
 
-    res.status(200).json({ success: true, data: pending });
+    // ── Enrich rows with client + course display info ────────────────────
+    // The row-level fields above only carry the courseId — the new Pending
+    // Approvals table needs the client name/logo and the course name to
+    // render, and the Client filter dropdown needs a list of clients that
+    // actually have pending items. Do it in ONE course lookup (batched over
+    // the whole page) rather than a per-row query.
+    const courseIds = Array.from(new Set(pending.map((p) => String(p.courseId || '')).filter(Boolean)));
+    let courseInfoById = new Map();
+    if (courseIds.length > 0) {
+      const courseDocs = await CourseStructure.find({ _id: { $in: courseIds } })
+        .select('_id courseName clientId clientName')
+        .lean();
+      courseInfoById = new Map(courseDocs.map((c) => [String(c._id), c]));
+    }
+    // Optional client hydration — fills a logo URL and re-checks the name
+    // (a rename on the client doesn't propagate to the embedded course
+    // scalar). ClientManagement is a separate collection, imported lazily
+    // so this controller doesn't load it when unused.
+    let clientById = new Map();
+    if (courseInfoById.size > 0) {
+      const ClientManagement = require('../../../models/ClientManagementModel');
+      const clientIds = Array.from(new Set(
+        Array.from(courseInfoById.values())
+          .map((c) => c?.clientId ? String(c.clientId) : null)
+          .filter(Boolean)
+      ));
+      if (clientIds.length > 0) {
+        const clientDocs = await ClientManagement.find({ _id: { $in: clientIds } })
+          .select('_id clientCompany clientLogo')
+          .lean();
+        clientById = new Map(clientDocs.map((cl) => [String(cl._id), cl]));
+      }
+    }
+    const enriched = pending.map((p) => {
+      const course = courseInfoById.get(String(p.courseId || '')) || null;
+      const client = course?.clientId ? clientById.get(String(course.clientId)) || null : null;
+      return {
+        ...p,
+        courseName: course?.courseName || '',
+        clientId: course?.clientId ? String(course.clientId) : '',
+        clientName: client?.clientCompany || course?.clientName || '',
+        clientLogo: client?.clientLogo || '',
+      };
+    });
+
+    res.status(200).json({ success: true, data: enriched });
   } catch (err) {
     console.error('listPendingApprovals error:', err);
     res.status(500).json({ message: [{ key: 'error', value: err.message }] });

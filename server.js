@@ -69,6 +69,15 @@ const glossaryRoutes = require("./routes/courses/glossaryRoutes");
 connectDB();
 app.use('/Developers Backup/LMS', express.static('\\\\192.168.1.4\\Developers Backup\\LMS'));
 
+// Public static assets uploaded through the API (currently just client
+// logos — see /client-management/upload-logo). Files are written under
+// Server/uploads/... and read back at http[s]://<host>/uploads/... so the
+// URL saved on the record works for anyone whose browser can reach this
+// server. Kept small on purpose: image logos only. The subdirectory is
+// created on demand by the upload handler; static() itself does not
+// require it to exist upfront.
+app.use('/uploads', express.static(require('path').join(__dirname, 'uploads')));
+
 // Init Middleware
 // gzip every compressible response. The big JSON list endpoints (users
 // directory, courses analytics) are highly repetitive and shrink ~85-90%;
@@ -250,6 +259,12 @@ app.use("/api", require("./routes/executionRoutes"));
 // ─── Super Admin module (independent, namespaced under /superadmin) ──────────
 app.use(require("./routes/superadmin"));
 
+// ─── External Assessment module (independent; two namespaces) ────────────────
+//   /api/admin/external/*  — admin CRUD, userAuth required
+//   /api/external/*        — participant access by invitation token, NO auth
+// External participants are not LMS users: nothing under this mount reads or
+// writes the `lms-users` collection.
+app.use(require("./routes/external"));
 
 
 // ─── Start ────────────────────────────────────────────────────────────────────

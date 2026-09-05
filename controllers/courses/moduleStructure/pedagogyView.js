@@ -7287,3 +7287,227 @@ exports.getCourseStudents = async (req, res) => {
     });
   }
 };
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * L&D Overview signals — GET /analytics/staff/analytics/ld-signals
+ *
+ * The L&D Overview (Reports ▸ Overview) derives almost everything from the
+ * existing `staffStudentAnalytics` roll-up. Two things that roll-up cannot
+ * answer, because it collapses every submission into a single {completed,
+ * total, percentage} triple:
+ *
+ *   1. Practice health — attempt counts, first-try solves, learners stuck on
+ *      the same question. These live on `questions[].attempts / score /
+ *      isCorrect` and are averaged away before they reach the client.
+ *   2. A real time series — `questions[].submittedAt` is the only place the
+ *      platform records WHEN work happened, so a "Training Performance Trend"
+ *      that is not invented has to be built from it.
+ *
+ * Rather than fabricate either, this endpoint replays the same submission data
+ * one more time and returns per-course, per-ISO-week buckets. It is additive:
+ * no existing route, controller or payload changes shape. Scoping to a client
+ * or a course happens on the client by filtering `courses[]` on courseId —
+ * the same set the console already scopes every other panel with — so
+ * changing the filter never refetches.
+ *
+ * Volume note: the whole users collection is a few MB (~380 docs), so a single
+ * lean read is cheaper than an aggregation that has to $objectToArray its way
+ * through dynamically-keyed answer maps.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** A question counts as SOLVED at half of its available marks — the same 50%
+ *  convention the exercise launcher uses for a default pass mark
+ *  (`Math.round(totalMarks * 0.5)`). `isCorrect` alone is not enough: manually
+ *  and AI-scored submissions leave it false and carry the verdict in `score`. */
+const LD_SOLVED_RATIO = 0.5;
+/** Attempts on one unsolved question before the learner counts as stuck. */
+const LD_STUCK_ATTEMPTS = 3;
+/** Stuck questions before a learner counts as REPEATEDLY failing. */
+const LD_REPEAT_FAIL_QUESTIONS = 2;
+
+const ldQuestionSolved = (q) => {
+  if (q.isCorrect === true || q.status === 'solved') return true;
+  const total = Number(q.totalScore) || 0;
+  const score = Number(q.score) || 0;
+  if (total > 0) return score >= total * LD_SOLVED_RATIO;
+  // No marks configured — an evaluated submission that scored anything at all.
+  return score > 0;
+};
+
+const ldQuestionAttempted = (q) =>
+  !!q.submittedAt ||
+  ['attempted', 'evaluated', 'submitted', 'solved'].includes(q.status);
+
+/** ISO-week bucket key (the Monday), matching the client's `mondayKey`. */
+const ldMondayKey = (d) => {
+  const dt = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  dt.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 6) % 7));
+  return dt.toISOString().slice(0, 10);
+};
+
+exports.ldOverviewSignals = async (req, res) => {
+  try {
+    const { institution } = req.user;
+
+    const users = await User.find({ institution, 'courses.0': { $exists: true } })
+      .select('courses role')
+      .populate({ path: 'role', select: 'renameRole originalRole roleValue', model: 'Role' })
+      .lean();
+
+    const students = users.filter((u) => {
+      const rv = (u.role && (u.role.roleValue || u.role.renameRole)) || '';
+      return rv.toLowerCase() === 'student';
+    });
+
+    // courseId -> accumulator
+    const byCourse = new Map();
+    const acc = (cid) => {
+      let e = byCourse.get(cid);
+      if (!e) {
+        e = {
+          courseId: cid,
+          learners: 0,
+          attempts: 0,
+          attemptedQuestions: 0,
+          solvedQuestions: 0,
+          firstTrySolved: 0,
+          strugglingLearners: 0,
+          repeatFailLearners: 0,
+          weeks: new Map(),
+        };
+        byCourse.set(cid, e);
+      }
+      return e;
+    };
+    const week = (e, key) => {
+      let w = e.weeks.get(key);
+      if (!w) {
+        w = { w: key, act: 0, ex: 0, skillSum: 0, skillN: 0, youSum: 0, youN: 0 };
+        e.weeks.set(key, w);
+      }
+      return w;
+    };
+
+    students.forEach((u) => {
+      (u.courses || []).forEach((sc) => {
+        const cid = sc.courseId ? String(sc.courseId) : '';
+        if (!cid) return;
+        const answers = sc.answers || {};
+        const e = acc(cid);
+
+        let touched = false;
+        let stuckQuestions = 0;
+        // Weeks this learner submitted anything in, so `act` counts DISTINCT
+        // learners per week rather than submissions.
+        const activeWeeks = new Set();
+
+        Object.keys(answers).forEach((stage) => {
+          // I_Do is a file-MCQ map keyed by fileId, not an exercise array — it
+          // carries no per-question attempt data, so it has nothing to add here.
+          if (stage === 'I_Do' || stage === '_id') return;
+          const cats = answers[stage];
+          if (!cats || typeof cats !== 'object') return;
+
+          Object.keys(cats).forEach((cat) => {
+            const exercises = cats[cat];
+            if (!Array.isArray(exercises)) return;
+
+            exercises.forEach((ex) => {
+              const qs = Array.isArray(ex.questions) ? ex.questions : [];
+              let obtained = 0;
+              let available = 0;
+              let firstAt = null;
+              let lastAt = null;
+              let attemptedHere = 0;
+
+              qs.forEach((q) => {
+                if (!ldQuestionAttempted(q)) return;
+                attemptedHere += 1;
+                touched = true;
+
+                const tries = Math.max(1, Number(q.attempts) || 0);
+                e.attempts += tries;
+                e.attemptedQuestions += 1;
+
+                const solved = ldQuestionSolved(q);
+                if (solved) {
+                  e.solvedQuestions += 1;
+                  if (tries <= 1) e.firstTrySolved += 1;
+                } else if (tries >= LD_STUCK_ATTEMPTS) {
+                  stuckQuestions += 1;
+                }
+
+                obtained += Number(q.score) || 0;
+                available += Number(q.totalScore) || 0;
+
+                const at = q.submittedAt ? new Date(q.submittedAt) : null;
+                if (at && !Number.isNaN(at.getTime())) {
+                  if (!firstAt || at < firstAt) firstAt = at;
+                  if (!lastAt || at > lastAt) lastAt = at;
+                  activeWeeks.add(ldMondayKey(at));
+                }
+              });
+
+              if (!attemptedHere || !firstAt) return;
+
+              // One distinct (learner, exercise) pair, dated by its first
+              // submission — cumulating `ex` over weeks reproduces "exercises
+              // attempted so far", the numerator the roll-up calls `completed`.
+              week(e, ldMondayKey(firstAt)).ex += 1;
+
+              // Performance for that exercise, dated by its LAST submission:
+              // the week the learner actually finished working on it.
+              if (available > 0 && lastAt) {
+                const scorePct = Math.min(100, Math.round((obtained / available) * 100));
+                const w = week(e, ldMondayKey(lastAt));
+                w.skillSum += scorePct;
+                w.skillN += 1;
+                if (stage === 'You_Do') {
+                  w.youSum += scorePct;
+                  w.youN += 1;
+                }
+              }
+            });
+          });
+        });
+
+        if (touched) e.learners += 1;
+        if (stuckQuestions > 0) e.strugglingLearners += 1;
+        if (stuckQuestions >= LD_REPEAT_FAIL_QUESTIONS) e.repeatFailLearners += 1;
+        activeWeeks.forEach((k) => { week(e, k).act += 1; });
+      });
+    });
+
+    const courses = [...byCourse.values()].map((e) => ({
+      courseId: e.courseId,
+      learners: e.learners,
+      attempts: e.attempts,
+      attemptedQuestions: e.attemptedQuestions,
+      solvedQuestions: e.solvedQuestions,
+      firstTrySolved: e.firstTrySolved,
+      strugglingLearners: e.strugglingLearners,
+      repeatFailLearners: e.repeatFailLearners,
+      weeks: [...e.weeks.values()].sort((a, b) => (a.w < b.w ? -1 : 1)),
+    }));
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        generatedAt: new Date().toISOString(),
+        rules: {
+          solvedRatio: LD_SOLVED_RATIO,
+          stuckAttempts: LD_STUCK_ATTEMPTS,
+          repeatFailQuestions: LD_REPEAT_FAIL_QUESTIONS,
+        },
+        courses,
+      },
+    });
+  } catch (error) {
+    console.error('Error building L&D overview signals:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: error.message,
+    });
+  }
+};

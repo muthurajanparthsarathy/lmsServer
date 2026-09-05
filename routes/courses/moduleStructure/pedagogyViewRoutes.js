@@ -31,6 +31,7 @@ const {
   studentDashboardAnalyticsOptimized,
   getStudentCourseProgress,
   staffStudentAnalytics,
+  ldOverviewSignals,
   createPage,
   updatePage,
   deletePage,
@@ -95,6 +96,15 @@ router.get(
   '/analytics/staff/analytics/students',
   userAuth,
   staffStudentAnalytics
+);
+
+// Attempt-level practice health + the weekly submission series behind the L&D
+// Overview's Training Performance Trend. Additive companion to the roll-up
+// above, which averages both away — see `ldOverviewSignals`.
+router.get(
+  '/analytics/staff/analytics/ld-signals',
+  userAuth,
+  ldOverviewSignals
 );
 
 router.get(

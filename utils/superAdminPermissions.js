@@ -246,6 +246,51 @@ const SUPER_ADMIN_PERMISSIONS = [
     isActive: true,
     order: 17,
   },
+  {
+    // External → Assessment. Assessments run for people who are NOT LMS users:
+    // participants live in their own collections (external-participants,
+    // external-assessment-attempts) and are never written to `lms-users`.
+    //
+    // Like POC Dashboard above, its page is NOT at /lms/pages/<permissionKey> —
+    // PERMISSION_ROUTES in client/src/app/lms/shared/navRoutes.ts maps it to
+    // /lms/pages/external/assessment, and PERMISSION_ROUTE_GROUPS gives it the
+    // whole subtree (create/edit wizard, Questions, Participants).
+    //
+    // Functions mirror `admin-external-assessment` in the client's
+    // config/permissions.tree.ts exactly — the two lists must agree or a
+    // ticked box in the modal resolves against nothing.
+    permissionName: "Assessment",
+    permissionKey: "externalassessment",
+    permissionFunctionality: [
+      "View Details",
+      "Create Assessment",
+      "Edit",
+      "Delete",
+      "Questions",
+      "Participants",
+      "Add Participant",
+      "Bulk Upload",
+    ],
+    icon: "ClipboardList",
+    color: "violet",
+    description: "Assessments for external participants — separate from LMS users",
+    isActive: true,
+    order: 18,
+  },
+  {
+    // External → Event. Placeholder screen (Coming Soon) — the permission
+    // exists now so it can be granted ahead of the build, and the rail entry
+    // appears the moment the real screen lands. No functions, matching
+    // `admin-external-event` in the client tree.
+    permissionName: "Event",
+    permissionKey: "externalevent",
+    permissionFunctionality: [],
+    icon: "CalendarDays",
+    color: "violet",
+    description: "External events — coming soon",
+    isActive: true,
+    order: 19,
+  },
 ];
 
 // Returns a deep copy so callers can safely assign it to a mongoose doc

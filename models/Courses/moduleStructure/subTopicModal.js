@@ -478,6 +478,10 @@ const approvalWorkflowSchema = new mongoose.Schema({
   overallStatus: { type: String, enum: ["in_progress", "approved", "rejected"], default: "in_progress" },
   studentVisible: { type: Boolean, default: false },
   initiatedAt: { type: Date, default: null },
+  // Snapshot of the submitter — see moduleModal.js for the rationale.
+  initiatedByUserId: { type: mongoose.Schema.Types.ObjectId, ref: "LMS-User", default: null },
+  initiatedByName: { type: String, default: "" },
+  initiatedByEmail: { type: String, default: "" },
   completedAt: { type: Date, default: null },
   editedSinceReject: { type: Boolean, default: false },
   resubmissionCount: { type: Number, default: 0 },
