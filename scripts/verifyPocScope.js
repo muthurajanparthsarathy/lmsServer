@@ -24,7 +24,7 @@ const tokenModal = require("../models/tokenModal");
 const ClientManagement = require("../models/ClientManagementModel");
 const CourseStructure = require("../models/Courses/courseStructureModal");
 
-const BASE = process.env.VERIFY_BASE_URL || "https://http://localhost:5533";
+const BASE = process.env.VERIFY_BASE_URL || "https://https://lmsserver-yeve.onrender.com";
 const POC_EMAIL = process.env.VERIFY_POC_EMAIL || "poc@gmail.com";
 
 let pass = 0;
